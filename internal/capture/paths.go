@@ -98,6 +98,11 @@ func resolveProspectivePath(path string) (string, error) {
 }
 
 func pathWithin(parent, candidate string) (bool, error) {
+	if !strings.EqualFold(
+		filepath.VolumeName(parent), filepath.VolumeName(candidate),
+	) {
+		return false, nil
+	}
 	relative, err := filepath.Rel(parent, candidate)
 	if err != nil {
 		return false, fmt.Errorf("comparing paths: %w", err)

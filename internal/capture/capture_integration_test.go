@@ -117,6 +117,69 @@ func TestRunClaudeProducesExactResultAndPreservesChildOutcome(t *testing.T) {
 	}
 }
 
+func TestReportPricingFailureWritesOrReplaysFailureResult(t *testing.T) {
+	tests := []struct {
+		name        string
+		priorReason ReasonCode
+		wantReason  ReasonCode
+	}{
+		{name: "new failure", wantReason: ReasonIngestFailed},
+		{
+			name:        "prior failure",
+			priorReason: ReasonNoSession, wantReason: ReasonNoSession,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			started := time.Now().UTC()
+			captureDir := filepath.Join(t.TempDir(), "capture")
+			resultPath := filepath.Join(t.TempDir(), "usage.json")
+			state, err := createState(captureDir, manifest{
+				OccurrenceID:      "pricing-load-failure",
+				Provider:          string(ProviderClaude),
+				ProviderSessionID: "11111111-1111-4111-8111-111111111111",
+				ProviderRoot:      t.TempDir(),
+				ProviderWorkDir:   t.TempDir(),
+				StartedAt:         started,
+				Execution:         ExecutionOutcome{StartedAt: started},
+				Invocation:        invocationName(ProviderClaude),
+				Limits:            testLimits(),
+			})
+			require.NoError(t, err)
+			var priorData []byte
+			if test.priorReason != "" {
+				prior := failureResult(state.manifest, test.priorReason, "test")
+				priorData, err = encodeResult(
+					prior, state.manifest.Limits.MaxResultBytes,
+				)
+				require.NoError(t, err)
+				require.NoError(t, state.storeAttempt(priorData, false))
+			}
+			state.close()
+
+			reporting, err := Report(t.Context(), ReportOptions{
+				CaptureDir: captureDir, ResultPath: resultPath,
+				LoadCustomPricing: func() (map[string]config.CustomModelRate, error) {
+					return nil, assert.AnError
+				},
+				AgentsViewVersion: "test",
+			})
+
+			require.ErrorContains(t, err, assert.AnError.Error())
+			assert.Equal(t, ReportingFailed, reporting.Outcome)
+			assert.Equal(t, test.wantReason, reporting.Reason)
+			data, readErr := os.ReadFile(resultPath)
+			require.NoError(t, readErr)
+			result, decodeErr := DecodeResult(bytes.NewReader(data))
+			require.NoError(t, decodeErr)
+			assert.Equal(t, test.wantReason, result.Reporting.Reason)
+			if priorData != nil {
+				assert.Equal(t, priorData, data)
+			}
+		})
+	}
+}
+
 func TestRunFinalizesUsageAfterPostStartStreamError(t *testing.T) {
 	root := t.TempDir()
 	resultPath := filepath.Join(t.TempDir(), "usage.json")

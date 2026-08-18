@@ -335,10 +335,26 @@ func Report(ctx context.Context, opts ReportOptions) (ReportingOutcome, error) {
 	if opts.LoadCustomPricing != nil {
 		customPricing, err = opts.LoadCustomPricing()
 		if err != nil {
-			return ReportingOutcome{}, err
+			return storeReportResult(
+				state, resultPath, stdout,
+				failureResult(
+					state.manifest, ReasonIngestFailed, opts.AgentsViewVersion,
+				),
+				err,
+			)
 		}
 	}
 	result, reportErr := finalize(ctx, state, customPricing, opts.AgentsViewVersion)
+	return storeReportResult(state, resultPath, stdout, result, reportErr)
+}
+
+func storeReportResult(
+	state *captureState,
+	resultPath string,
+	stdout ioWriter,
+	result Result,
+	reportErr error,
+) (ReportingOutcome, error) {
 	result, data, reportErr := encodeAndStoreResult(state, result, reportErr)
 	if data != nil {
 		reportErr = errors.Join(
