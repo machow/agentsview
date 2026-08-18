@@ -27,6 +27,12 @@ type sourceSnapshot struct {
 	ModTime time.Time
 }
 
+type codexSourceSelection struct {
+	ID       string
+	Anchor   time.Time
+	LivePath string
+}
+
 func rejectExistingClaudeSources(root, sessionID string, limits Limits) error {
 	dir, err := os.Open(root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -323,6 +329,7 @@ type ingestedCapture struct {
 	Descendants   []db.Session
 	Paths         []string
 	LiveSnapshots []sourceSnapshot
+	CodexSources  []codexSourceSelection
 }
 
 func ingest(
@@ -347,14 +354,22 @@ func ingest(
 	}
 	allPaths := append([]string(nil), paths...)
 	allSnapshots := append([]sourceSnapshot(nil), liveSnapshots...)
+	var codexSources []codexSourceSelection
+	if Provider(state.manifest.Provider) == ProviderCodex && len(liveSnapshots) == 1 {
+		codexSources = append(codexSources, codexSourceSelection{
+			ID: state.manifest.ProviderSessionID, Anchor: state.manifest.StartedAt,
+			LivePath: liveSnapshots[0].Path,
+		})
+	}
 	if Provider(state.manifest.Provider) == ProviderCodex && discoverCodexChildren {
-		newPaths, newSnapshots, childErr := ingestCodexChildren(
+		newPaths, newSnapshots, selections, childErr := ingestCodexChildren(
 			ctx, state, database, engine, deadline)
 		if childErr != nil {
 			return fail(childErr)
 		}
 		allPaths = append(allPaths, newPaths...)
 		allSnapshots = append(allSnapshots, newSnapshots...)
+		codexSources = append(codexSources, selections...)
 	}
 	root, usage, descendants, err := loadCapturedUsage(ctx, state, database)
 	if err != nil {
@@ -370,6 +385,7 @@ func ingest(
 	return &ingestedCapture{
 		Database: database, Root: root, Usage: usage,
 		Descendants: descendants, Paths: allPaths, LiveSnapshots: allSnapshots,
+		CodexSources: codexSources,
 	}, nil
 }
 
@@ -458,50 +474,55 @@ func ingestCodexChildren(
 	database *db.DB,
 	engine *syncer.Engine,
 	deadline time.Time,
-) ([]string, []sourceSnapshot, error) {
+) ([]string, []sourceSnapshot, []codexSourceSelection, error) {
 	rootID := "codex:" + state.manifest.ProviderSessionID
 	frontier := []string{rootID}
 	seen := map[string]bool{rootID: true}
 	var allPaths []string
 	var allSnapshots []sourceSnapshot
+	var selections []codexSourceSelection
 	for len(seen) <= state.manifest.Limits.MaxSources {
 		children, err := codexChildRefs(ctx, database, frontier)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		pending := unseenCodexChildren(children, seen)
 		if len(pending) == 0 {
-			return allPaths, allSnapshots, nil
+			return allPaths, allSnapshots, selections, nil
 		}
 		if len(seen)+len(pending) > state.manifest.Limits.MaxSources {
-			return nil, nil, errorWithReason(
+			return nil, nil, nil, errorWithReason(
 				ReasonSourceLimit, "source count exceeds limit")
 		}
 		livePaths, err := awaitCodexChildPaths(ctx, state, pending, deadline)
 		if err != nil {
-			return allPaths, allSnapshots, err
+			return allPaths, allSnapshots, selections, err
 		}
 		stable, err := awaitStablePaths(
 			ctx, livePaths, deadline, state.manifest.Limits)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		persisted, err := state.persistSourcePaths(ctx, stable)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if err := engine.SyncPathsContext(ctx, persisted.Paths); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		frontier = frontier[:0]
-		for _, child := range pending {
+		for i, child := range pending {
 			seen[child.ID] = true
 			frontier = append(frontier, child.ID)
+			selections = append(selections, codexSourceSelection{
+				ID:     strings.TrimPrefix(child.ID, "codex:"),
+				Anchor: child.SpawnedAt, LivePath: livePaths[i],
+			})
 		}
 		allPaths = append(allPaths, persisted.Paths...)
 		allSnapshots = append(allSnapshots, persisted.Snapshots...)
 	}
-	return nil, nil, errorWithReason(ReasonSourceLimit, "source count exceeds limit")
+	return nil, nil, nil, errorWithReason(ReasonSourceLimit, "source count exceeds limit")
 }
 
 type codexChildRef struct {

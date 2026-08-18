@@ -225,3 +225,39 @@ func TestFinishIngestedResultBoundsArchiveCloseByFinalizationDeadline(
 	assert.Equal(t, ReportingFailed, result.Reporting.Outcome)
 	assert.Equal(t, ReasonFinalizationTimeout, result.Reporting.Reason)
 }
+
+func TestCodexFinalVerificationRejectsLateChildCandidate(t *testing.T) {
+	root := t.TempDir()
+	anchor := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	dayDir := filepath.Join(root, filepath.FromSlash(anchor.Format("2006/01/02")))
+	require.NoError(t, os.MkdirAll(dayDir, 0o700))
+	rootID := "11111111-1111-4111-8111-111111111111"
+	childID := "22222222-2222-4222-8222-222222222222"
+	writeSource := func(name, id string) string {
+		path := filepath.Join(dayDir, name+"-"+id+".jsonl")
+		line := fmt.Sprintf(`{"type":"session_meta","payload":{"id":%q}}`, id)
+		require.NoError(t, os.WriteFile(path, []byte(line+"\n"), 0o600))
+		return path
+	}
+	rootPath := writeSource("rollout-root", rootID)
+	childPath := writeSource("rollout-child", childID)
+	limits := testLimits()
+	expected, err := snapshotSources(
+		context.Background(), []string{rootPath, childPath}, limits)
+	require.NoError(t, err)
+	writeSource("rollout-late-conflict", childID)
+	state := &captureState{manifest: manifest{
+		Provider: string(ProviderCodex), ProviderRoot: root, Limits: limits,
+	}}
+
+	unchanged, err := liveSourcesUnchanged(
+		context.Background(), state, expected, []codexSourceSelection{
+			{ID: rootID, Anchor: anchor, LivePath: rootPath},
+			{ID: childID, Anchor: anchor, LivePath: childPath},
+		},
+	)
+
+	require.Error(t, err)
+	assert.False(t, unchanged)
+	assert.Equal(t, ReasonMultipleSessions, reasonForError(err, ""))
+}

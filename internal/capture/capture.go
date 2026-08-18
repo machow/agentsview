@@ -540,7 +540,7 @@ func finalize(
 			return captureFailure(state, err, agentsViewVersion)
 		}
 		unchanged, verifyErr := liveSourcesUnchanged(
-			finalCtx, state, ingested.LiveSnapshots)
+			finalCtx, state, ingested.LiveSnapshots, ingested.CodexSources)
 		if verifyErr != nil {
 			_ = ingested.close(finalCtx)
 			return captureFailure(state, verifyErr, agentsViewVersion)
@@ -686,8 +686,9 @@ func liveSourcesUnchanged(
 	ctx context.Context,
 	state *captureState,
 	expected []sourceSnapshot,
+	codexSources []codexSourceSelection,
 ) (bool, error) {
-	paths := make([]string, 0, len(expected))
+	var paths []string
 	if Provider(state.manifest.Provider) == ProviderClaude {
 		roots, err := locateRoot(state.manifest)
 		if err != nil {
@@ -706,8 +707,16 @@ func liveSourcesUnchanged(
 			return false, err
 		}
 	} else {
-		for _, snapshot := range expected {
-			paths = append(paths, snapshot.Path)
+		if len(codexSources) != len(expected) {
+			return false, errorWithReason(
+				ReasonSourceUnavailable,
+				"selected Codex source set is incomplete",
+			)
+		}
+		var err error
+		paths, err = verifyCodexSourceSelections(ctx, state, codexSources)
+		if err != nil {
+			return false, err
 		}
 	}
 	current, err := snapshotSources(ctx, paths, state.manifest.Limits)
@@ -721,6 +730,40 @@ func liveSourcesUnchanged(
 	sort.Slice(expected, func(i, j int) bool { return expected[i].Path < expected[j].Path })
 	sort.Slice(current, func(i, j int) bool { return current[i].Path < current[j].Path })
 	return sameSnapshots(expected, current), nil
+}
+
+func verifyCodexSourceSelections(
+	ctx context.Context,
+	state *captureState,
+	selections []codexSourceSelection,
+) ([]string, error) {
+	paths := make([]string, 0, len(selections))
+	for _, selection := range selections {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		matches, err := locateCodexRoot(
+			state.manifest.ProviderRoot, selection.ID,
+			selection.Anchor, state.manifest.Limits,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if len(matches) > 1 {
+			return nil, errorWithReason(
+				ReasonMultipleSessions,
+				"multiple exact Codex session sources found",
+			)
+		}
+		if len(matches) == 0 || matches[0] != selection.LivePath {
+			return nil, errorWithReason(
+				ReasonSourceUnavailable,
+				"selected Codex session source is unavailable",
+			)
+		}
+		paths = append(paths, matches[0])
+	}
+	return paths, nil
 }
 
 func ingestCaptureResult(
