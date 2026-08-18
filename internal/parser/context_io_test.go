@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,4 +61,20 @@ func TestJSONLProviderFingerprintStopsAfterContextCancellation(t *testing.T) {
 			require.ErrorIs(t, err, context.Canceled)
 		})
 	}
+}
+
+func TestClaudeCanceledHeadSniffIsNotCached(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fork.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(
+		`{"type":"user","uuid":"root","parentUuid":null,"sessionKind":"bg"}`+"\n",
+	), 0o600))
+
+	_, err := claudeSniffHead(newCancelOnErrCheckContext(t, 3), path)
+	require.ErrorIs(t, err, context.Canceled)
+
+	sniff, err := claudeSniffHead(t.Context(), path)
+	require.NoError(t, err)
+	assert.True(t, sniff.ok)
+	assert.True(t, sniff.rootIsBG)
+	assert.Equal(t, "root", sniff.rootUUID)
 }

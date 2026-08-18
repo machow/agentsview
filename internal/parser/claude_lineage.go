@@ -116,6 +116,9 @@ func claudeSniffHead(
 	if err != nil {
 		return claudeHeadSniff{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return claudeHeadSniff{}, err
+	}
 
 	claudeSniffMu.Lock()
 	if len(claudeSniffCache) >= claudeSniffCacheMaxEntries {
@@ -146,6 +149,11 @@ func claudeSniffHeadUncached(
 		}
 		lineBytes, ok := lr.nextBytes()
 		if !ok {
+			if lr.Err() != nil {
+				if err := ctx.Err(); err != nil {
+					return claudeHeadSniff{}, err
+				}
+			}
 			return claudeHeadSniff{}, nil
 		}
 		if !gjson.ValidBytes(lineBytes) {
@@ -166,6 +174,9 @@ func claudeSniffHeadUncached(
 			rootIsBG: gjson.GetBytes(lineBytes, "sessionKind").Str == "bg",
 			ok:       true,
 		}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return claudeHeadSniff{}, err
 	}
 	return claudeHeadSniff{}, nil
 }
