@@ -23,8 +23,11 @@ type SessionBatchWrite struct {
 	IdentitySnapshotProject *string
 	Signals                 SessionSignalUpdate
 	Findings                []SecretFinding
-	DataVersion             int
-	ReplaceMessages         bool
+	// SkipSignalUpdates omits automatic quality-signal and secret-finding
+	// persistence for bounded ingestion callers that do not consume it.
+	SkipSignalUpdates bool
+	DataVersion       int
+	ReplaceMessages   bool
 }
 
 // SessionBatchResult summarizes a WriteSessionBatch call.
@@ -471,12 +474,14 @@ func writeOneSessionBatchTx(
 		}
 	}
 
-	if err := updateSessionSignalsTx(tx, write.Session.ID, write.Signals); err != nil {
-		return 0, err
-	}
-	if err := replaceSecretFindingsTx(tx, write.Session.ID, write.Findings,
-		write.Signals.SecretLeakCount, write.Signals.SecretsRulesVersion); err != nil {
-		return 0, err
+	if !write.SkipSignalUpdates {
+		if err := updateSessionSignalsTx(tx, write.Session.ID, write.Signals); err != nil {
+			return 0, err
+		}
+		if err := replaceSecretFindingsTx(tx, write.Session.ID, write.Findings,
+			write.Signals.SecretLeakCount, write.Signals.SecretsRulesVersion); err != nil {
+			return 0, err
+		}
 	}
 	if err := enqueueArtifactExportIfGenerationUnchangedTx(
 		tx, write.Session.ID, queueGenerationBefore, queueExistedBefore,

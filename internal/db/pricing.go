@@ -178,6 +178,14 @@ func sqlitePricingInsertMissingStatement(
 func (db *DB) UpsertModelPricing(
 	prices []ModelPricing,
 ) error {
+	return db.UpsertModelPricingContext(context.Background(), prices)
+}
+
+// UpsertModelPricingContext is UpsertModelPricing with caller cancellation.
+func (db *DB) UpsertModelPricingContext(
+	ctx context.Context,
+	prices []ModelPricing,
+) error {
 	if err := db.requireWritable(); err != nil {
 		return err
 	}
@@ -188,7 +196,7 @@ func (db *DB) UpsertModelPricing(
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	existing, err := db.listModelPricing(context.Background())
+	existing, err := db.listModelPricing(ctx)
 	if err != nil {
 		return fmt.Errorf(
 			"listing current pricing before upsert: %w", err,
@@ -199,7 +207,7 @@ func (db *DB) UpsertModelPricing(
 		return nil
 	}
 
-	tx, err := db.getWriter().Begin()
+	tx, err := db.getWriter().BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning pricing upsert: %w", err)
 	}
@@ -208,7 +216,7 @@ func (db *DB) UpsertModelPricing(
 	for i := 0; i < len(prices); i += pricingWriteBatch {
 		end := min(i+pricingWriteBatch, len(prices))
 		query, args := sqlitePricingUpsertStatement(prices[i:end])
-		if _, err := tx.Exec(query, args...); err != nil {
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf(
 				"upserting pricing batch starting at %d: %w",
 				i, err,
@@ -216,7 +224,7 @@ func (db *DB) UpsertModelPricing(
 		}
 	}
 	for _, price := range prices {
-		if _, err := tx.Exec(`
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE model_pricing
 			SET updated_at = CASE
 				WHEN updated_at >= strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -232,15 +240,17 @@ func (db *DB) UpsertModelPricing(
 			)
 		}
 	}
-	if err := replaceModelPricingBands(tx, prices); err != nil {
+	if err := replaceModelPricingBands(ctx, tx, prices); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func replaceModelPricingBands(tx *sql.Tx, prices []ModelPricing) error {
+func replaceModelPricingBands(
+	ctx context.Context, tx *sql.Tx, prices []ModelPricing,
+) error {
 	for _, price := range prices {
-		if _, err := tx.Exec(
+		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM model_pricing_bands WHERE model_pattern = ?`,
 			price.ModelPattern,
 		); err != nil {
@@ -251,7 +261,7 @@ func replaceModelPricingBands(tx *sql.Tx, prices []ModelPricing) error {
 			)
 		}
 		for _, band := range price.Bands {
-			if _, err := tx.Exec(`
+			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO model_pricing_bands
 					(model_pattern, above_input_tokens,
 					 input_microdollars_per_mtok, output_microdollars_per_mtok,
@@ -283,6 +293,13 @@ func replaceModelPricingBands(tx *sql.Tx, prices []ModelPricing) error {
 // longer carries (an exact-match row would otherwise shadow the
 // date-based pricing path for those names).
 func (db *DB) DeleteModelPricing(patterns []string) error {
+	return db.DeleteModelPricingContext(context.Background(), patterns)
+}
+
+// DeleteModelPricingContext is DeleteModelPricing with caller cancellation.
+func (db *DB) DeleteModelPricingContext(
+	ctx context.Context, patterns []string,
+) error {
 	if err := db.requireWritable(); err != nil {
 		return err
 	}
@@ -299,7 +316,7 @@ func (db *DB) DeleteModelPricing(patterns []string) error {
 		placeholders[i] = "?"
 		args[i] = p
 	}
-	_, err := db.getWriter().Exec(
+	_, err := db.getWriter().ExecContext(ctx,
 		`DELETE FROM model_pricing
 		 WHERE model_pattern IN (`+strings.Join(placeholders, ",")+`)`,
 		args...,
@@ -313,8 +330,13 @@ func (db *DB) DeleteModelPricing(patterns []string) error {
 // GetPricingMeta reads a metadata value stored as a sentinel
 // row in model_pricing. Returns "" if not found.
 func (db *DB) GetPricingMeta(key string) (string, error) {
+	return db.GetPricingMetaContext(context.Background(), key)
+}
+
+// GetPricingMetaContext is GetPricingMeta with caller cancellation.
+func (db *DB) GetPricingMetaContext(ctx context.Context, key string) (string, error) {
 	var val string
-	err := db.getReader().QueryRow(
+	err := db.getReader().QueryRowContext(ctx,
 		`SELECT updated_at FROM model_pricing
 		 WHERE model_pattern = ?`, key,
 	).Scan(&val)
@@ -332,7 +354,12 @@ func (db *DB) GetPricingMeta(key string) (string, error) {
 // SetPricingMeta stores a metadata value as a sentinel row
 // in model_pricing with zero pricing fields.
 func (db *DB) SetPricingMeta(key, value string) error {
-	_, err := db.getWriter().Exec(
+	return db.SetPricingMetaContext(context.Background(), key, value)
+}
+
+// SetPricingMetaContext is SetPricingMeta with caller cancellation.
+func (db *DB) SetPricingMetaContext(ctx context.Context, key, value string) error {
+	_, err := db.getWriter().ExecContext(ctx,
 		`INSERT INTO model_pricing
 			(model_pattern, input_microdollars_per_mtok, output_microdollars_per_mtok,
 			 cache_creation_microdollars_per_mtok, cache_read_microdollars_per_mtok,
@@ -462,7 +489,7 @@ func (db *DB) InsertMissingModelPricing(
 			)
 		}
 	}
-	if err := replaceModelPricingBands(tx, prices); err != nil {
+	if err := replaceModelPricingBands(context.Background(), tx, prices); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -5,6 +5,15 @@ description: Release history for AgentsView
 
 ## Unreleased
 
+**New features**
+
+- Add automation-only one-shot capture for exact `claude -p` and
+  `codex exec --json` executions, with isolated accounting, recoverable retries,
+  exclusively created and protected local evidence, preserved child streams
+  and outcomes, bounded finalization work, and a closed versioned usage result.
+  Existing Claude sources and conflicting provider identities cannot be reused
+  as a new occurrence.
+
 ---
 
 ## 0.41.1

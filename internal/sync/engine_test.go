@@ -4947,6 +4947,69 @@ func TestWriteBatchRemoteIDPrefixUsageEvents(t *testing.T) {
 	assert.Equal(t, 50, events[0].OutputTokens)
 }
 
+func TestDisabledSignalRecomputationSkipsEveryFullWritePath(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(*Engine, pendingWrite) error
+	}{
+		{
+			name: "ordinary",
+			write: func(e *Engine, pw pendingWrite) error {
+				written, _, failed, _ := e.writeBatch(
+					[]pendingWrite{pw}, syncWriteDefault, true,
+				)
+				if written != 1 || failed != 0 {
+					return fmt.Errorf("written=%d failed=%d", written, failed)
+				}
+				return nil
+			},
+		},
+		{
+			name: "bulk",
+			write: func(e *Engine, pw pendingWrite) error {
+				written, _, failed, _ := e.writeBatch(
+					[]pendingWrite{pw}, syncWriteBulk, true,
+				)
+				if written != 1 || failed != 0 {
+					return fmt.Errorf("written=%d failed=%d", written, failed)
+				}
+				return nil
+			},
+		},
+		{name: "single session", write: (*Engine).writeSessionFull},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := openTestDB(t)
+			engine := NewEngine(database, EngineConfig{
+				Machine: "capture", DisableSignalRecomputation: true,
+			})
+			t.Cleanup(engine.Close)
+			id := "no-signals-" + strings.ReplaceAll(tc.name, " ", "-")
+			pw := pendingWrite{
+				sess: parser.ParsedSession{
+					ID: id, Project: "capture", Machine: "capture",
+					Agent: parser.AgentClaude, StartedAt: time.Now(),
+					MessageCount: 1,
+				},
+				msgs: []parser.ParsedMessage{{
+					Role: parser.RoleUser, Content: "bounded capture content",
+				}},
+			}
+
+			require.NoError(t, tc.write(engine, pw))
+
+			session, err := database.GetSession(t.Context(), id)
+			require.NoError(t, err)
+			require.NotNil(t, session)
+			assert.Zero(t, session.QualitySignalVersion)
+			assert.Empty(t, session.SecretsRulesVersion)
+			messages, err := database.GetAllMessages(t.Context(), id)
+			require.NoError(t, err)
+			assert.Len(t, messages, 1)
+		})
+	}
+}
+
 func TestWriteBatchBulkDemotesFailedDeclaredMember(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

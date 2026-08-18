@@ -76,6 +76,28 @@ func SessionUsageWithSubagents(
 		rowSet.DiscardedContributingSessions, includeBreakdown)
 }
 
+// SessionUsageTokenTotals projects a canonical session-usage result onto the
+// repository's aggregate UsageTotals token fields. complete is false when the
+// canonical breakdown rows do not cover all stored output tokens, because the
+// input and cache categories then describe a narrower set than output.
+func SessionUsageTokenTotals(usage *db.SessionUsage) (totals db.UsageTotals, complete bool) {
+	if usage == nil || !usage.HasTokenData {
+		return db.UsageTotals{}, false
+	}
+	totals.OutputTokens = usage.TotalOutputTokens
+	if usage.BreakdownCount == 0 {
+		return totals, false
+	}
+	breakdownOutputTokens := 0
+	for _, row := range usage.Breakdown {
+		totals.InputTokens += row.InputTokens
+		breakdownOutputTokens += row.OutputTokens
+		totals.CacheCreationTokens += row.CacheCreationInputTokens
+		totals.CacheReadTokens += row.CacheReadInputTokens
+	}
+	return totals, breakdownOutputTokens == usage.TotalOutputTokens
+}
+
 // combineSubagentUsageFromRows builds the combined result from one deduped,
 // globally ordered usage-row set. rootID is the id the rows were queried
 // under, which is what decides whether a row belongs to the parent.

@@ -401,6 +401,14 @@ type EngineConfig struct {
 	// local sync watermarks or pollute the skipped_files table
 	// with temp-dir paths.
 	Ephemeral bool
+	// DiscardPendingWritesOnCancel makes scoped callers treat cancellation as
+	// a hard archive-write boundary. Isolated capture databases use it because
+	// retries rebuild scratch state; live archives leave it false so cancellation
+	// can still revoke already-staged deletion proof before returning.
+	DiscardPendingWritesOnCancel bool
+	// DisableSignalRecomputation skips quality and secret signal work. It is
+	// reserved for bounded parsers whose result does not consume those fields.
+	DisableSignalRecomputation bool
 	// Emitter, when non-nil, is called once after each sync pass
 	// that wrote data. Safe to leave nil (e.g., in PG serve mode
 	// where the engine is not run).
@@ -482,6 +490,8 @@ type Engine struct {
 	// prefix all session IDs to avoid collisions, rewrite
 	// temp paths to "host:/remote/path" form.
 	ephemeral              bool
+	discardWritesOnCancel  bool
+	disableSignalRecompute bool
 	idPrefix               string
 	pathRewriter           func(string) string
 	storedPathResolver     func(string) (string, bool)
@@ -817,6 +827,8 @@ func NewEngine(
 		skipHashKeys:            skipHashKeys,
 		s3CodexIndexCache:       make(map[string]s3CodexIndexSnapshot),
 		ephemeral:               cfg.Ephemeral,
+		discardWritesOnCancel:   cfg.DiscardPendingWritesOnCancel,
+		disableSignalRecompute:  cfg.DisableSignalRecomputation,
 		idPrefix:                cfg.IDPrefix,
 		pathRewriter:            cfg.PathRewriter,
 		storedPathResolver:      cfg.StoredPathResolver,
@@ -851,6 +863,9 @@ func NewEngine(
 			context.Background(), sessionID,
 		)
 	}
+	if cfg.DisableSignalRecomputation {
+		recompute = func(string) {}
+	}
 	e.signalSched = newSignalScheduler(
 		signalRecomputeInterval, signalRecomputeQuiet,
 		// Inline runs happen from markDirty inside writeIncremental,
@@ -868,6 +883,9 @@ func NewEngine(
 			flush()
 		},
 	)
+	if cfg.DisableSignalRecomputation {
+		e.signalSched.stop()
+	}
 	return e
 }
 
@@ -8697,6 +8715,13 @@ func (e *Engine) collectAndBatchWithOptions(
 		if len(pending) == 0 {
 			return
 		}
+		if ctx.Err() != nil && e.discardWritesOnCancel {
+			releaseParseRetentionLeases(pendingLeases)
+			pending = pending[:0]
+			pendingLeases = pendingLeases[:0]
+			pendingCacheWrites = pendingCacheWrites[:0]
+			return
+		}
 		func() {
 			defer releaseParseRetentionLeases(pendingLeases)
 			var outcome writeBatchOutcome
@@ -8719,7 +8744,16 @@ func (e *Engine) collectAndBatchWithOptions(
 					}
 				}
 			} else {
-				outcome = e.writeBatchWithOutcome(pending, writeMode, false)
+				writeCtx := ctx
+				if !e.discardWritesOnCancel {
+					writeCtx = context.WithoutCancel(ctx)
+				}
+				outcome = e.writeBatchWithOutcomeContext(
+					writeCtx, pending, writeMode, false,
+				)
+			}
+			if ctx.Err() != nil && e.discardWritesOnCancel {
+				return
 			}
 			// Claude can emit several session rows from one DAG transcript.
 			// Those rows are initially written below the current data version,
@@ -8837,6 +8871,12 @@ func (e *Engine) collectAndBatchWithOptions(
 		}
 		if options.observeResult != nil {
 			options.observeResult(r)
+		}
+		if ctx.Err() != nil && e.discardWritesOnCancel {
+			stats.Aborted = true
+			r.releaseRetention()
+			drainResults(results, total-i-1)
+			goto flush
 		}
 
 		if r.err != nil {
@@ -9157,7 +9197,13 @@ func (e *Engine) collectAndBatchWithOptions(
 
 flush:
 	flushPending()
+	if ctx.Err() != nil && e.discardWritesOnCancel {
+		return stats
+	}
 	flushBaselineSources()
+	if ctx.Err() != nil && e.discardWritesOnCancel {
+		return stats
+	}
 	if len(exactBaselineOwnerships) > 0 ||
 		len(rejectedBaselineOwnerships) > 0 {
 		exactOwnerships := make(
@@ -13626,6 +13672,9 @@ func (e *Engine) failProjectIdentityBackfill(
 func (e *Engine) recomputeSignalsFromDB(
 	ctx context.Context, sessionID string,
 ) (int, error) {
+	if e.disableSignalRecompute {
+		return 0, nil
+	}
 	sess, err := e.db.GetSessionFull(ctx, sessionID)
 	if err != nil {
 		return 0, fmt.Errorf(
@@ -13909,6 +13958,12 @@ type worktreeProjectResolver func(
 ) (string, bool)
 
 func (e *Engine) loadWorktreeProjectResolver() worktreeProjectResolver {
+	return e.loadWorktreeProjectResolverContext(context.Background())
+}
+
+func (e *Engine) loadWorktreeProjectResolverContext(
+	ctx context.Context,
+) worktreeProjectResolver {
 	cache := map[string][]db.WorktreeProjectMapping{}
 	failed := map[string]bool{}
 	return func(machine, cwd, currentProject string) (string, bool) {
@@ -13922,7 +13977,7 @@ func (e *Engine) loadWorktreeProjectResolver() worktreeProjectResolver {
 			}
 			var err error
 			mappings, err = e.db.ListActiveWorktreeProjectMappings(
-				context.Background(), machine,
+				ctx, machine,
 			)
 			if err != nil {
 				log.Printf(
@@ -14139,11 +14194,32 @@ func (e *Engine) writeBatchWithOutcome(
 	writeMode syncWriteMode,
 	forceReplace bool,
 ) writeBatchOutcome {
+	return e.writeBatchWithOutcomeContext(
+		context.Background(), batch, writeMode, forceReplace,
+	)
+}
+
+func (e *Engine) writeBatchWithOutcomeContext(
+	ctx context.Context,
+	batch []pendingWrite,
+	writeMode syncWriteMode,
+	forceReplace bool,
+) writeBatchOutcome {
+	outcome := writeBatchOutcome{
+		written:  make([]bool, len(batch)),
+		resolved: make([]bool, len(batch)),
+	}
+	if ctx.Err() != nil {
+		return outcome
+	}
 	var err error
 	batch, err = e.normalizePendingWriteMachines(
-		context.Background(), batch,
+		ctx, batch,
 	)
 	if err != nil {
+		if ctx.Err() != nil {
+			return outcome
+		}
 		log.Printf("normalize pending write machines: %v", err)
 		outcome := writeBatchOutcome{
 			written:  make([]bool, len(batch)),
@@ -14156,9 +14232,12 @@ func (e *Engine) writeBatchWithOutcome(
 		return outcome
 	}
 	batch, err = e.preserveUnavailableSourceProjects(
-		context.Background(), batch,
+		ctx, batch,
 	)
 	if err != nil {
+		if ctx.Err() != nil {
+			return outcome
+		}
 		log.Printf("preserve unavailable source projects: %v", err)
 		outcome := writeBatchOutcome{
 			written:  make([]bool, len(batch)),
@@ -14170,19 +14249,23 @@ func (e *Engine) writeBatchWithOutcome(
 		outcome.failedSessions = len(batch)
 		return outcome
 	}
+	if ctx.Err() != nil {
+		return outcome
+	}
 	if writeMode == syncWriteBulk {
-		return e.writeBatchBulkWithOutcome(batch, forceReplace)
+		return e.writeBatchBulkWithOutcomeContext(ctx, batch, forceReplace)
 	}
-
-	outcome := writeBatchOutcome{
-		written:  make([]bool, len(batch)),
-		resolved: make([]bool, len(batch)),
-	}
-	resolveWorktreeProject := e.loadWorktreeProjectResolver()
+	resolveWorktreeProject := e.loadWorktreeProjectResolverContext(ctx)
 	for i, pw := range batch {
+		if ctx.Err() != nil {
+			return outcome
+		}
 		s, msgs, verdict := e.prepareSessionWrite(
 			pw, resolveWorktreeProject,
 		)
+		if ctx.Err() != nil {
+			return outcome
+		}
 		if verdict != sessionWriteOK {
 			if verdict == sessionWriteCwdFiltered {
 				outcome.cwdFiltered++
@@ -14200,6 +14283,9 @@ func (e *Engine) writeBatchWithOutcome(
 			existing < db.CurrentDataVersion() {
 			stale = true
 		}
+		if ctx.Err() != nil {
+			return outcome
+		}
 
 		// The session row must exist before messages can be inserted (FK
 		// constraint), but a source-missing row stays tombstoned until every
@@ -14209,6 +14295,9 @@ func (e *Engine) writeBatchWithOutcome(
 		revivingSourceMissing, err :=
 			e.upsertSessionPendingContentForWrite(pw, s)
 		if err != nil {
+			if ctx.Err() != nil {
+				return outcome
+			}
 			if isIntentionalSessionSkip(err) {
 				outcome.resolved[i] = true
 				if pw.sess.File.Path != "" {
@@ -14229,15 +14318,30 @@ func (e *Engine) writeBatchWithOutcome(
 			pw, forceReplace, stale, revivingSourceMissing,
 		)
 
-		update, findings := computeSignalsAndSecrets(s, msgs)
+		var update db.SessionSignalUpdate
+		var findings []db.SecretFinding
+		if !e.disableSignalRecompute {
+			update, findings = computeSignalsAndSecrets(s, msgs)
+			if ctx.Err() != nil {
+				return outcome
+			}
+		}
 
 		var werr error
-		if replaceMessages {
+		if replaceMessages && !e.disableSignalRecompute {
 			werr = e.db.ReplaceSessionContent(s.ID, msgs, update, findings)
+		} else if replaceMessages {
+			if msgs == nil {
+				msgs = []db.Message{}
+			}
+			werr = e.db.ReplaceSessionMessages(s.ID, msgs)
 		} else {
 			werr = e.writeMessages(s.ID, msgs)
 		}
 		if werr != nil {
+			if ctx.Err() != nil {
+				return outcome
+			}
 			log.Printf(
 				"write messages for %s: %v",
 				s.ID, werr,
@@ -14246,9 +14350,15 @@ func (e *Engine) writeBatchWithOutcome(
 			outcome.failedSessions++
 			continue
 		}
+		if ctx.Err() != nil {
+			return outcome
+		}
 		if err := e.db.ReplaceSessionUsageEvents(
 			s.ID, e.usageEventsForWrite(s.ID, pw.usageEvents),
 		); err != nil {
+			if ctx.Err() != nil {
+				return outcome
+			}
 			log.Printf(
 				"write usage events for %s: %v",
 				s.ID, err,
@@ -14256,6 +14366,9 @@ func (e *Engine) writeBatchWithOutcome(
 			e.markStaleFailedMemberWrite(pw)
 			outcome.failedSessions++
 			continue
+		}
+		if ctx.Err() != nil {
+			return outcome
 		}
 
 		// Advance data_version only after the message and usage writes
@@ -14265,6 +14378,9 @@ func (e *Engine) writeBatchWithOutcome(
 		if err := e.db.SetSessionDataVersion(
 			s.ID, dataVersionForWrite(pw),
 		); err != nil {
+			if ctx.Err() != nil {
+				return outcome
+			}
 			log.Printf(
 				"set data_version for %s: %v", s.ID, err,
 			)
@@ -14272,8 +14388,14 @@ func (e *Engine) writeBatchWithOutcome(
 			outcome.failedSessions++
 			continue
 		}
+		if ctx.Err() != nil {
+			return outcome
+		}
 
-		if !replaceMessages {
+		if !replaceMessages && !e.disableSignalRecompute {
+			if ctx.Err() != nil {
+				return outcome
+			}
 			// Same ordering contract as recomputeSignalsFromDB: the
 			// version-advancing signals update only runs after findings
 			// persisted, so a partial failure leaves the session below
@@ -14286,7 +14408,13 @@ func (e *Engine) writeBatchWithOutcome(
 				log.Printf("signals: update %s: %v", s.ID, err)
 			}
 		}
+		if ctx.Err() != nil {
+			return outcome
+		}
 		if err := e.db.ReviveSourceMissingSession(s.ID); err != nil {
+			if ctx.Err() != nil {
+				return outcome
+			}
 			log.Printf("revive source-missing session %s: %v", s.ID, err)
 			outcome.failedSessions++
 			continue
@@ -15131,6 +15259,14 @@ type localGitIdentity struct {
 func (e *Engine) writeBatchBulkWithOutcome(
 	batch []pendingWrite, forceReplace bool,
 ) writeBatchOutcome {
+	return e.writeBatchBulkWithOutcomeContext(
+		context.Background(), batch, forceReplace,
+	)
+}
+
+func (e *Engine) writeBatchBulkWithOutcomeContext(
+	ctx context.Context, batch []pendingWrite, forceReplace bool,
+) writeBatchOutcome {
 	outcome := writeBatchOutcome{
 		written:  make([]bool, len(batch)),
 		resolved: make([]bool, len(batch)),
@@ -15140,13 +15276,19 @@ func (e *Engine) writeBatchBulkWithOutcome(
 	sources := make(map[string]batchSourceFile, len(batch))
 	pendingByID := make(map[string]pendingWrite, len(batch))
 	pendingIndexByID := make(map[string]int, len(batch))
-	resolveWorktreeProject := e.loadWorktreeProjectResolver()
+	resolveWorktreeProject := e.loadWorktreeProjectResolverContext(ctx)
 
 	for pendingIndex, pw := range batch {
+		if ctx.Err() != nil {
+			return outcome
+		}
 		tPrep := time.Now()
 		s, msgs, verdict := e.prepareSessionWrite(
 			pw, resolveWorktreeProject,
 		)
+		if ctx.Err() != nil {
+			return outcome
+		}
 		e.phaseStats.PrepNanos.Add(int64(time.Since(tPrep)))
 		if verdict != sessionWriteOK {
 			if verdict == sessionWriteCwdFiltered {
@@ -15157,9 +15299,16 @@ func (e *Engine) writeBatchBulkWithOutcome(
 		replaceMessages := shouldReplaceFullParseMessages(
 			pw, forceReplace, false, false,
 		)
-		tScan := time.Now()
-		update, findings := computeSignalsAndSecrets(s, msgs)
-		e.phaseStats.ScanNanos.Add(int64(time.Since(tScan)))
+		var update db.SessionSignalUpdate
+		var findings []db.SecretFinding
+		if !e.disableSignalRecompute {
+			tScan := time.Now()
+			update, findings = computeSignalsAndSecrets(s, msgs)
+			if ctx.Err() != nil {
+				return outcome
+			}
+			e.phaseStats.ScanNanos.Add(int64(time.Since(tScan)))
+		}
 		snapshotProject := pw.sess.Project
 		writes = append(writes, db.SessionBatchWrite{
 			Session:     s,
@@ -15171,6 +15320,7 @@ func (e *Engine) writeBatchBulkWithOutcome(
 			IdentitySnapshotProject: &snapshotProject,
 			Signals:                 update,
 			Findings:                findings,
+			SkipSignalUpdates:       e.disableSignalRecompute,
 			DataVersion:             dataVersionForWrite(pw),
 			ReplaceMessages:         replaceMessages,
 		})
@@ -15186,6 +15336,9 @@ func (e *Engine) writeBatchBulkWithOutcome(
 		}
 	}
 	if len(writes) == 0 {
+		return outcome
+	}
+	if ctx.Err() != nil {
 		return outcome
 	}
 
@@ -15996,13 +16149,22 @@ func (e *Engine) writeSessionFullWithResolver(
 		log.Printf("upsert session %s: %v", s.ID, err)
 		return err
 	}
-	update, findings := computeSignalsAndSecrets(s, msgs)
-	if err := e.db.ReplaceSessionContent(s.ID, msgs, update, findings); err != nil {
+	var replaceErr error
+	if e.disableSignalRecompute {
+		if msgs == nil {
+			msgs = []db.Message{}
+		}
+		replaceErr = e.db.ReplaceSessionMessages(s.ID, msgs)
+	} else {
+		update, findings := computeSignalsAndSecrets(s, msgs)
+		replaceErr = e.db.ReplaceSessionContent(s.ID, msgs, update, findings)
+	}
+	if replaceErr != nil {
 		log.Printf(
 			"replace messages for %s: %v",
-			s.ID, err,
+			s.ID, replaceErr,
 		)
-		return err
+		return replaceErr
 	}
 	if err := e.db.ReplaceSessionUsageEvents(
 		s.ID, e.usageEventsForWrite(s.ID, pw.usageEvents),

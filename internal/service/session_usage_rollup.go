@@ -154,6 +154,14 @@ func delegatedDescendants(
 	return out, nil
 }
 
+// DelegatedUsageSessions returns the canonical session set included by the
+// session-usage subagent rollup. The root itself is not returned.
+func DelegatedUsageSessions(
+	ctx context.Context, store db.Store, rootID string,
+) ([]db.Session, error) {
+	return delegatedDescendants(ctx, store, rootID)
+}
+
 func explicitSubagentCount(descendants []db.Session) int {
 	count := 0
 	for _, descendant := range descendants {

@@ -258,6 +258,58 @@ func TestCollectAndBatchRetainsParseLeaseThroughWrite(t *testing.T) {
 	<-done
 }
 
+func TestCollectAndBatchDiscardsPendingResultAfterCancellation(t *testing.T) {
+	engine := NewEngine(openTestDB(t), EngineConfig{
+		Machine:                      "local",
+		DiscardPendingWritesOnCancel: true,
+	})
+	t.Cleanup(engine.Close)
+	budget := newParseRetentionBudget(defaultParseRetentionBytes)
+	lease, err := budget.acquire(t.Context(), defaultParseRetentionBytes)
+	require.NoError(t, err)
+
+	results := make(chan syncJob, 2)
+	results <- syncJob{
+		path:           "/sessions/one.jsonl",
+		retentionLease: lease,
+		processResult: processResult{results: []parser.ParseResult{{
+			Session: parser.ParsedSession{ID: "one", Agent: parser.AgentClaude},
+		}}},
+	}
+	results <- syncJob{
+		path: "/sessions/two.jsonl",
+		processResult: processResult{results: []parser.ParseResult{{
+			Session: parser.ParsedSession{ID: "two", Agent: parser.AgentClaude},
+		}}},
+	}
+	close(results)
+	ctx, cancel := context.WithCancel(t.Context())
+	writes := 0
+	engine.writeBatchOverride = func(
+		[]pendingWrite, syncWriteMode, bool,
+	) (int, int, int, int) {
+		writes++
+		return 1, 0, 0, 0
+	}
+
+	observed := 0
+	stats := engine.collectAndBatchWithOptions(
+		ctx, results, 2, 2, nil, syncWriteDefault,
+		collectAndBatchOptions{observeResult: func(syncJob) {
+			observed++
+			if observed == 2 {
+				cancel()
+			}
+		}},
+	)
+
+	assert.True(t, stats.Aborted)
+	assert.Zero(t, writes, "cancellation must not flush parsed scratch rows")
+	next, err := budget.acquire(t.Context(), defaultParseRetentionBytes)
+	require.NoError(t, err, "discarded parse data must release its retention lease")
+	next.Release()
+}
+
 func TestDrainResultsReleasesParseLeases(t *testing.T) {
 	budget := newParseRetentionBudget(defaultParseRetentionBytes)
 	lease, err := budget.acquire(t.Context(), defaultParseRetentionBytes)

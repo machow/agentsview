@@ -211,6 +211,18 @@ Grok section and remove the explicit registry exception in the coverage test.
   process's kind on each persisted line, overwriting the copied value, so the
   bg marker reflects the forking process and cannot be inherited through
   replayed entries. Evidence remains `no-public-source`.
+  Reverified 2026-08-16 with Claude Code 2.1.233 using a controlled
+  `claude -p --session-id <uuid>` probe under an isolated
+  `CLAUDE_CONFIG_DIR`. Before the deliberately bounded probe was terminated
+  during its API retry, Claude had created the exact UUID transcript under
+  `projects/<sanitized-cwd>/`. A working directory containing spaces, `.`,
+  `_`, `@`, and separators confirmed that the producer preserves ASCII
+  letters, digits, and `-` and replaces every other character with `-`. The
+  transcript existed before process exit, so an interrupted wrapper can retain
+  exact recovery evidence. One-shot capture copies the exact root and bounded
+  subagent tree after an unchanged-file interval and reports parser termination
+  separately as assurance; an interrupted transcript can still contain usable
+  token records.
 
 ## OpenClaude (`openclaude`)
 
@@ -333,6 +345,19 @@ Grok section and remove the explicit registry exception in the coverage test.
   newest 4 MiB and accepts records from the preceding 24 hours. If a daemon
   restarts during a longer autonomous run whose last prompt falls outside
   those bounds, the rollout relies on those fallbacks until its next prompt.
+  Reverified 2026-08-16 with Codex CLI 0.147.0: `codex exec --json` emitted a
+  `thread.started` record carrying one UUID, followed by turn and item records
+  and a terminal usage record, while its dated rollout began with a
+  `session_meta.id` equal to that UUID and ended with `task_complete`. One-shot
+  capture therefore accepts only this structured mode, tees its bytes without
+  interpreting formatted stderr, and validates the ID against filenames and
+  `session_meta` inside the wrapper-start local and UTC days, each plus or minus
+  one day. It copies and ingests that exact rollout first, then uses parsed
+  `spawn_agent` links and their message timestamps to repeat the same bounded
+  day-shard lookup around each child's spawn time.
+  Final accounting uses only the provider-shaped copies in the capture
+  directory. This bounded lookup is deliberately separate from the provider's
+  general full-archive UUID discovery.
 
 ## TraeX (`traex`)
 

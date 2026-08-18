@@ -64,34 +64,58 @@ const RefreshCooldown = time.Hour
 // aliases so they cannot shadow the date-based CanonicalModelForDate
 // pricing path.
 func SeedFallback(database *db.DB) error {
-	stored, err := database.GetPricingMeta(fallbackVersionMetaKey)
+	return SeedFallbackContext(context.Background(), database)
+}
+
+// SeedFallbackContext is SeedFallback with cancellation checks between each
+// catalog operation. It is intended for bounded, short-lived workflows.
+func SeedFallbackContext(ctx context.Context, database *db.DB) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	stored, err := database.GetPricingMetaContext(ctx, fallbackVersionMetaKey)
 	if err != nil {
 		return err
 	}
-	storageVersion, err := database.GetPricingMeta(pricingStorageMetaKey)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	storageVersion, err := database.GetPricingMetaContext(ctx, pricingStorageMetaKey)
 	if err != nil {
 		return err
 	}
 	if stored == pricing.SeedVersion && storageVersion == pricingStorageVersion {
 		return nil
 	}
-	if err := upsert(database, pricing.FallbackPricing()); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := upsertContext(ctx, database, pricing.FallbackPricing()); err != nil {
 		return err
 	}
 	// Only delete while reseeding (version mismatch). A later LiteLLM
 	// refresh that legitimately lists one of these names is not
 	// clobbered on every startup.
-	if err := database.DeleteModelPricing(
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := database.DeleteModelPricingContext(ctx,
 		pricing.DateAliasedModels(),
 	); err != nil {
 		return err
 	}
-	if err := database.SetPricingMeta(
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := database.SetPricingMetaContext(ctx,
 		fallbackVersionMetaKey, pricing.SeedVersion,
 	); err != nil {
 		return err
 	}
-	return database.SetPricingMeta(pricingStorageMetaKey, pricingStorageVersion)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return database.SetPricingMetaContext(ctx, pricingStorageMetaKey, pricingStorageVersion)
 }
 
 // RefreshIfStale refreshes when the last attempt is older than cooldown.
@@ -242,6 +266,12 @@ func runCurrent(
 }
 
 func upsert(database *db.DB, prices []pricing.ModelPricing) error {
+	return upsertContext(context.Background(), database, prices)
+}
+
+func upsertContext(
+	ctx context.Context, database *db.DB, prices []pricing.ModelPricing,
+) error {
 	dbPrices := make([]db.ModelPricing, len(prices))
 	for i, price := range prices {
 		bands := make([]db.PricingBand, len(price.Bands))
@@ -263,5 +293,5 @@ func upsert(database *db.DB, prices []pricing.ModelPricing) error {
 			Bands:                bands,
 		}
 	}
-	return database.UpsertModelPricing(dbPrices)
+	return database.UpsertModelPricingContext(ctx, dbPrices)
 }
