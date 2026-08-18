@@ -67,6 +67,19 @@ func TestWindowsParentSecurityRejectsUntrustedOwner(t *testing.T) {
 	require.ErrorContains(t, err, "untrusted owner")
 }
 
+func TestWindowsParentSecurityAllowsTrustedInstallerOwner(t *testing.T) {
+	allowed, err := captureDirectorySIDs()
+	require.NoError(t, err)
+	descriptor, err := windows.SecurityDescriptorFromString(
+		"O:" + trustedInstallerSIDString + "D:P(A;;GA;;;" + allowed[0].String() + ")",
+	)
+	require.NoError(t, err)
+
+	err = verifyWindowsParentSecurity(descriptor, allowed)
+
+	require.NoError(t, err)
+}
+
 func TestWindowsParentSecurityRejectsUntrustedInheritedWrites(t *testing.T) {
 	allowed, err := captureDirectorySIDs()
 	require.NoError(t, err)

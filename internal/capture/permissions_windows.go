@@ -14,6 +14,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// trustedInstallerSIDString is the fixed service SID for Windows Modules
+// Installer, which owns system-managed volume roots on supported Windows hosts.
+const trustedInstallerSIDString = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+
 func createSecureCaptureDirectory(path string) error {
 	allowed, err := captureDirectorySIDs()
 	if err != nil {
@@ -91,7 +95,12 @@ func verifyWindowsParentSecurity(
 	if err != nil {
 		return err
 	}
-	if owner == nil || !captureSIDAllowed(owner, allowed) {
+	trustedInstaller, err := windows.StringToSid(trustedInstallerSIDString)
+	if err != nil {
+		return fmt.Errorf("resolving trusted Windows owner: %w", err)
+	}
+	if owner == nil || (!captureSIDAllowed(owner, allowed) &&
+		!windows.EqualSid(owner, trustedInstaller)) {
 		return errors.New("parent directory has an untrusted owner")
 	}
 	dacl, _, err := descriptor.DACL()
