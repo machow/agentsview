@@ -2,8 +2,10 @@ package capture
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,65 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/agentsview/internal/db"
 )
+
+func TestOversizedResultWritesBoundedFailureAndKeepsPriorFailure(t *testing.T) {
+	tests := []struct {
+		name        string
+		priorReason ReasonCode
+		wantReason  ReasonCode
+	}{
+		{name: "new failure", wantReason: ReasonResultSizeLimit},
+		{
+			name:        "prior failure",
+			priorReason: ReasonNoSession, wantReason: ReasonNoSession,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			limits := DefaultLimits()
+			limits.MaxResultBytes = minResultBytes
+			state := &captureState{
+				dir: t.TempDir(),
+				manifest: manifest{
+					OccurrenceID:      "oversized-result",
+					Provider:          string(ProviderClaude),
+					ProviderSessionID: "11111111-1111-4111-8111-111111111111",
+					Limits:            limits,
+				},
+			}
+			var priorData []byte
+			if test.priorReason != "" {
+				prior := failureResult(state.manifest, test.priorReason, "test")
+				var err error
+				priorData, err = encodeResult(prior, limits.MaxResultBytes)
+				require.NoError(t, err)
+				require.NoError(t, state.storeAttempt(priorData, false))
+			}
+			oversized := baseResult(state.manifest, "test")
+			oversized.Reporting = ReportingOutcome{Outcome: ReportingComplete}
+			for i := range 512 {
+				oversized.Provider.IncludedSessionIDs = append(
+					oversized.Provider.IncludedSessionIDs,
+					strings.Repeat("s", 250)+fmt.Sprintf("%03d", i),
+				)
+			}
+
+			result, data, err := encodeAndStoreResult(state, oversized, nil)
+
+			require.Error(t, err)
+			assert.Equal(t, ReportingFailed, result.Reporting.Outcome)
+			assert.Equal(t, test.wantReason, result.Reporting.Reason)
+			require.NotEmpty(t, data)
+			assert.LessOrEqual(t, len(data), limits.MaxResultBytes)
+			stored, readErr := os.ReadFile(state.sealedPath())
+			require.NoError(t, readErr)
+			assert.Equal(t, data, stored)
+			if priorData != nil {
+				assert.Equal(t, priorData, data)
+			}
+		})
+	}
+}
 
 func TestCompletedAttemptBecomesRecoverableTimeoutAtSealDeadline(t *testing.T) {
 	state := &captureState{

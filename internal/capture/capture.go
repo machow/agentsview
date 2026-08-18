@@ -354,7 +354,11 @@ func encodeAndStoreResult(
 ) (Result, []byte, error) {
 	data, err := encodeResult(result, state.manifest.Limits.MaxResultBytes)
 	if err != nil {
-		return result, nil, errors.Join(reportErr, err)
+		reportErr = errors.Join(reportErr, err)
+		if reasonForError(err, "") == ReasonResultSizeLimit {
+			return storeResultSizeFailure(state, result, reportErr)
+		}
+		return result, nil, reportErr
 	}
 	complete := result.Reporting.Outcome == ReportingComplete
 	previous, previousData, err := existingFailedAttempt(state)
@@ -378,6 +382,35 @@ func encodeAndStoreResult(
 		result.Producer.AgentsViewVersion,
 	)
 	data, err = encodeResult(result, state.manifest.Limits.MaxResultBytes)
+	if err == nil {
+		err = state.storeAttempt(data, false)
+	}
+	if errors.Is(err, errAttemptExists) {
+		return preservedFailedAttempt(state, reportErr)
+	}
+	if err != nil {
+		return result, nil, errors.Join(reportErr, err)
+	}
+	return result, data, reportErr
+}
+
+func storeResultSizeFailure(
+	state *captureState,
+	oversized Result,
+	reportErr error,
+) (Result, []byte, error) {
+	previous, previousData, err := existingFailedAttempt(state)
+	if err != nil {
+		return oversized, nil, errors.Join(reportErr, err)
+	}
+	if previousData != nil {
+		return previous, previousData, reportErr
+	}
+	result := failureResult(
+		state.manifest, ReasonResultSizeLimit,
+		oversized.Producer.AgentsViewVersion,
+	)
+	data, err := encodeResult(result, state.manifest.Limits.MaxResultBytes)
 	if err == nil {
 		err = state.storeAttempt(data, false)
 	}
@@ -896,7 +929,8 @@ func encodeResult(result Result, maxBytes int) ([]byte, error) {
 	}
 	data = append(data, '\n')
 	if len(data) > maxBytes {
-		return nil, errors.New("capture result exceeds size limit")
+		return nil, errorWithReason(
+			ReasonResultSizeLimit, "capture result exceeds size limit")
 	}
 	return data, nil
 }
