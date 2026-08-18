@@ -42,6 +42,8 @@ func TestRelayWindowsSignalsForwardsRepeatedInterrupts(t *testing.T) {
 	done := make(chan struct{})
 	forwarded := make(chan os.Signal, 2)
 	exited := make(chan struct{})
+	signals <- os.Interrupt
+	signals <- os.Interrupt
 	go func() {
 		relayWindowsSignals(signals, done, func(sig os.Signal) {
 			forwarded <- sig
@@ -49,8 +51,6 @@ func TestRelayWindowsSignalsForwardsRepeatedInterrupts(t *testing.T) {
 		close(exited)
 	}()
 
-	signals <- os.Interrupt
-	signals <- os.Interrupt
 	for range 2 {
 		select {
 		case got := <-forwarded:

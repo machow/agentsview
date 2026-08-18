@@ -353,12 +353,14 @@ func runChild(
 		cmd.Stdout = io.MultiWriter(marker, streams.Stdout)
 	}
 	configureChildProcess(cmd)
+	signalCh := registerChildSignals()
 	if err := cmd.Start(); err != nil {
+		unregisterChildSignals(signalCh)
 		completed := time.Now().UTC()
 		outcome.CompletedAt = &completed
 		return outcome, 0, false, fmt.Errorf("starting producer: %w", err)
 	}
-	stopForwarding := forwardSignals(cmd.Process)
+	stopForwarding := forwardSignals(cmd.Process, signalCh)
 	err = cmd.Wait()
 	wrapperSignal, wrapperSignalCode := stopForwarding()
 	if marker != nil {

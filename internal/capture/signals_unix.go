@@ -15,9 +15,19 @@ func configureChildProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func forwardSignals(process *os.Process) func() (string, int) {
+func registerChildSignals() chan os.Signal {
 	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	return ch
+}
+
+func unregisterChildSignals(ch chan os.Signal) {
+	signal.Stop(ch)
+}
+
+func forwardSignals(
+	process *os.Process, ch chan os.Signal,
+) func() (string, int) {
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	var receipt struct {
@@ -64,7 +74,7 @@ func forwardSignals(process *os.Process) func() (string, int) {
 		}
 	})
 	return func() (string, int) {
-		signal.Stop(ch)
+		unregisterChildSignals(ch)
 		close(done)
 		wg.Wait()
 		receipt.Lock()

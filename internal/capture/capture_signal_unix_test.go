@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -163,6 +164,27 @@ func TestRepeatedWrapperSignalEscalatesIgnoredChild(t *testing.T) {
 		_ = syscall.Kill(-childProcessGroup, syscall.SIGKILL)
 		t.Fatal("repeated signal did not terminate the child process group")
 	}
+}
+
+func TestForwardSignalsDeliversSignalBufferedBeforeChildAvailable(t *testing.T) {
+	producer := copyCaptureHelper(t, "claude")
+	cmd := exec.Command(producer, "-p", "prompt")
+	cmd.Env = helperEnvironment(t.TempDir(), "claude-wait-signal", 0)
+	configureChildProcess(cmd)
+	signals := make(chan os.Signal, 2)
+	signals <- syscall.SIGTERM
+	require.NoError(t, cmd.Start())
+	stopForwarding := forwardSignals(cmd.Process, signals)
+
+	err := cmd.Wait()
+	wrapperSignal, wrapperCode := stopForwarding()
+
+	require.Error(t, err)
+	assert.Equal(t, "SIGTERM", wrapperSignal)
+	assert.Equal(t, 128+int(syscall.SIGTERM), wrapperCode)
+	childSignal, childCode := processSignal(cmd.ProcessState)
+	assert.Equal(t, "SIGTERM", childSignal)
+	assert.Equal(t, 128+int(syscall.SIGTERM), childCode)
 }
 
 func waitForCaptureSignalMarker(t *testing.T, marker string) int {
