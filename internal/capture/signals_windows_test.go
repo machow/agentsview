@@ -4,6 +4,7 @@ package capture
 
 import (
 	"os"
+	"os/signal"
 	"testing"
 	"time"
 
@@ -12,6 +13,29 @@ import (
 )
 
 func captureHelperProcessGroupID() int { return 0 }
+
+func captureHelperWaitForSignal(mode, marker string) {
+	var ch chan os.Signal
+	if mode == "claude-trap-signal" {
+		ch = make(chan os.Signal, 1)
+		signal.Notify(ch, os.Interrupt)
+	}
+	if mode == "claude-ignore-signal" {
+		signal.Ignore(os.Interrupt)
+	}
+	_ = os.WriteFile(marker, []byte("0"), 0o600)
+	if ch != nil {
+		<-ch
+		_ = os.WriteFile(
+			os.Getenv("AGENTSVIEW_CAPTURE_TEST_SIGNAL_HANDLED_MARKER"),
+			[]byte("handled"), 0o600,
+		)
+		os.Exit(0)
+	}
+	for {
+		time.Sleep(time.Hour)
+	}
+}
 
 func TestRelayWindowsSignalsForwardsRepeatedInterrupts(t *testing.T) {
 	signals := make(chan os.Signal, 2)

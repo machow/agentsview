@@ -19,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/agentsview/internal/artifact"
 	"go.kenn.io/agentsview/internal/config"
 	"go.kenn.io/agentsview/internal/db"
 	"go.kenn.io/agentsview/internal/parser"
@@ -743,6 +744,47 @@ func TestPruneUnlistedSourcesRemovesInterruptedAtomicWrite(t *testing.T) {
 	require.NoError(t, state.pruneUnlistedSources(t.Context()))
 
 	assert.NoFileExists(t, leftover)
+}
+
+func TestResetPersistedSourcesRemovesIncompleteAttemptCopies(t *testing.T) {
+	state := &captureState{
+		dir: t.TempDir(),
+		manifest: manifest{
+			Limits:          testLimits(),
+			SourcesComplete: true,
+			Sources: []TranscriptSource{{
+				SessionID: "old-session",
+				RawSource: artifact.RawSourceRef{
+					Path: "claude/projects/project-a/old-session.jsonl",
+				},
+			}},
+		},
+	}
+	recorded := state.sourcesPath(
+		"claude", "projects", "project-a", "old-session.jsonl",
+	)
+	uncommitted := state.sourcesPath(
+		"claude", "projects", "project-b", "new-session.jsonl",
+	)
+	require.NoError(t, os.MkdirAll(filepath.Dir(recorded), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Dir(uncommitted), 0o700))
+	require.NoError(t, os.WriteFile(recorded, []byte("old\n"), 0o600))
+	require.NoError(t, os.WriteFile(uncommitted, []byte("new\n"), 0o600))
+	require.NoError(t, os.WriteFile(state.bundlePath(), []byte("{}\n"), 0o600))
+	require.NoError(t, os.WriteFile(state.archivePath(), []byte("db"), 0o600))
+
+	require.NoError(t, state.resetPersistedSources(t.Context()))
+
+	assert.NoDirExists(t, state.sourcesPath())
+	assert.NoFileExists(t, state.archivePath())
+	assert.Empty(t, state.manifest.Sources)
+	assert.False(t, state.manifest.SourcesComplete)
+	data, err := os.ReadFile(state.manifestPath())
+	require.NoError(t, err)
+	var persisted manifest
+	require.NoError(t, json.Unmarshal(data, &persisted))
+	assert.Empty(t, persisted.Sources)
+	assert.False(t, persisted.SourcesComplete)
 }
 
 func TestRunClaudeReportingFailuresAreDistinctAndWriteResults(t *testing.T) {
@@ -1659,15 +1701,11 @@ func captureTestHelper() {
 		}
 		fmt.Fprintln(os.Stdout, "child stdout")
 		fmt.Fprintln(os.Stderr, "child stderr")
-		if mode == "claude-wait-signal" {
-			_ = os.WriteFile(
-				os.Getenv("AGENTSVIEW_CAPTURE_TEST_SIGNAL_MARKER"),
-				[]byte(fmt.Sprint(captureHelperProcessGroupID())),
-				0o600,
+		if mode == "claude-wait-signal" || mode == "claude-trap-signal" ||
+			mode == "claude-ignore-signal" {
+			captureHelperWaitForSignal(
+				mode, os.Getenv("AGENTSVIEW_CAPTURE_TEST_SIGNAL_MARKER"),
 			)
-			for {
-				time.Sleep(time.Hour)
-			}
 		}
 		os.Exit(exitCode)
 	}

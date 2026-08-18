@@ -8724,6 +8724,10 @@ func (e *Engine) collectAndBatchWithOptions(
 		}
 		func() {
 			defer releaseParseRetentionLeases(pendingLeases)
+			completionCtx := ctx
+			if !e.discardWritesOnCancel {
+				completionCtx = context.WithoutCancel(ctx)
+			}
 			var outcome writeBatchOutcome
 			if e.writeBatchOverride != nil {
 				writtenSessions, writtenMessages, failedSessions, cwdFiltered :=
@@ -8744,12 +8748,8 @@ func (e *Engine) collectAndBatchWithOptions(
 					}
 				}
 			} else {
-				writeCtx := ctx
-				if !e.discardWritesOnCancel {
-					writeCtx = context.WithoutCancel(ctx)
-				}
 				outcome = e.writeBatchWithOutcomeContext(
-					writeCtx, pending, writeMode, false,
+					completionCtx, pending, writeMode, false,
 				)
 			}
 			if ctx.Err() != nil && e.discardWritesOnCancel {
@@ -8790,7 +8790,7 @@ func (e *Engine) collectAndBatchWithOptions(
 						))
 					}
 					if err := e.db.SetSessionDataVersionsContext(
-						ctx, ids, db.CurrentDataVersion(),
+						completionCtx, ids, db.CurrentDataVersion(),
 					); err != nil {
 						log.Printf(
 							"complete provider source data versions: %v", err,

@@ -10,16 +10,17 @@ import (
 
 func configureChildProcess(*exec.Cmd) {}
 
-func forwardSignals(process *os.Process) func() {
+func forwardSignals(process *os.Process) func() (string, int) {
 	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, os.Interrupt)
 	done := make(chan struct{})
 	go relayWindowsSignals(ch, done, func(sig os.Signal) {
 		_ = process.Signal(sig)
 	})
-	return func() {
+	return func() (string, int) {
 		signal.Stop(ch)
 		close(done)
+		return "", 0
 	}
 }
 

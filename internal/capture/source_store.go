@@ -31,12 +31,79 @@ func (s *captureState) resetPersistedSources(ctx context.Context) error {
 	if err := s.clearSourceStaging(); err != nil {
 		return err
 	}
+	if err := s.clearPersistedSourceCopies(ctx); err != nil {
+		return err
+	}
 	if err := s.removeAttemptArchive(); err != nil {
 		return err
 	}
 	s.manifest.Sources = nil
 	s.manifest.SourcesComplete = false
 	return s.saveManifestContext(ctx)
+}
+
+func (s *captureState) clearPersistedSourceCopies(ctx context.Context) error {
+	// sources is an internal, capture-owned recovery tree. An unsealed attempt
+	// must remove the whole tree before it accounts for a replacement source
+	// set, including files copied before a manifest write was interrupted.
+	root := s.sourcesPath()
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("transcript bundle root is not a directory")
+	}
+	directories := make([]string, 0, s.manifest.Limits.MaxSources*4)
+	examined := 0
+	err = filepath.WalkDir(root, func(
+		path string, entry os.DirEntry, walkErr error,
+	) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		examined++
+		if examined > s.manifest.Limits.MaxSources*8 {
+			return errorWithReason(
+				ReasonSourceLimit, "transcript bundle tree exceeds entry limit")
+		}
+		if err := verifyCapturePathOwner(path); err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return errors.New("transcript bundle contains a symbolic link")
+		}
+		if entry.IsDir() {
+			directories = append(directories, path)
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("transcript bundle contains an unknown entry")
+		}
+		return os.Remove(path)
+	})
+	if err != nil {
+		return err
+	}
+	for i := len(directories) - 1; i >= 0; i-- {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := os.Remove(directories[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *captureState) removeAttemptArchive() error {

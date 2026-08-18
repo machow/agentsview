@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 	"syscall"
 )
 
@@ -14,25 +15,63 @@ func configureChildProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func forwardSignals(process *os.Process) func() {
+func forwardSignals(process *os.Process) func() (string, int) {
 	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
 	done := make(chan struct{})
+	var wg sync.WaitGroup
+	var receipt struct {
+		sync.Mutex
+		signal syscall.Signal
+		count  int
+	}
+	handle := func(sig os.Signal, forward bool) {
+		unixSignal, ok := sig.(syscall.Signal)
+		if !ok {
+			return
+		}
+		receipt.Lock()
+		if receipt.count == 0 {
+			receipt.signal = unixSignal
+		}
+		receipt.count++
+		count := receipt.count
+		receipt.Unlock()
+		if !forward {
+			return
+		}
+		if count == 1 {
+			_ = syscall.Kill(-process.Pid, unixSignal)
+			return
+		}
+		_ = syscall.Kill(-process.Pid, syscall.SIGKILL)
+	}
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			select {
 			case sig := <-ch:
-				if unixSignal, ok := sig.(syscall.Signal); ok {
-					_ = syscall.Kill(-process.Pid, unixSignal)
-				}
+				handle(sig, true)
 			case <-done:
-				return
+				for {
+					select {
+					case sig := <-ch:
+						handle(sig, false)
+					default:
+						return
+					}
+				}
 			}
 		}
 	}()
-	return func() {
+	return func() (string, int) {
 		signal.Stop(ch)
 		close(done)
+		wg.Wait()
+		receipt.Lock()
+		defer receipt.Unlock()
+		return signalNameAndCode(receipt.signal)
 	}
 }
 
@@ -41,7 +80,13 @@ func processSignal(state *os.ProcessState) (string, int) {
 	if !ok || !status.Signaled() {
 		return "", 0
 	}
-	sig := status.Signal()
+	return signalNameAndCode(status.Signal())
+}
+
+func signalNameAndCode(sig syscall.Signal) (string, int) {
+	if sig == 0 {
+		return "", 0
+	}
 	name := fmt.Sprintf("SIG%d", sig)
 	switch sig {
 	case syscall.SIGINT:

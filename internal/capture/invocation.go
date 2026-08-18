@@ -354,7 +354,7 @@ func runChild(
 	}
 	stopForwarding := forwardSignals(cmd.Process)
 	err := cmd.Wait()
-	stopForwarding()
+	wrapperSignal, wrapperSignalCode := stopForwarding()
 	if marker != nil {
 		marker.finish()
 	}
@@ -365,6 +365,10 @@ func runChild(
 			err = errors.New("producer process state is unavailable")
 		}
 		return outcome, 0, true, fmt.Errorf("waiting for producer: %w", err)
+	}
+	if wrapperSignal != "" {
+		outcome.Signal = wrapperSignal
+		return outcome, wrapperSignalCode, true, waitError(err)
 	}
 	if signal, code := processSignal(cmd.ProcessState); signal != "" {
 		outcome.Signal = signal
