@@ -729,7 +729,7 @@ func parseEndedAt(s string) (time.Time, error) {
 // transaction. Returns a slice of message IDs parallel to the
 // input msgs slice. The caller must hold db.mu.
 func insertMessagesTx(
-	tx *sql.Tx, msgs []Message,
+	tx transactionQueries, msgs []Message,
 ) ([]int64, error) {
 	ids := make([]int64, len(msgs))
 	nextID, err := nextMessageIDTx(tx)
@@ -764,7 +764,7 @@ func insertMessagesTx(
 	return ids, nil
 }
 
-func nextMessageIDTx(tx *sql.Tx) (int64, error) {
+func nextMessageIDTx(tx transactionQueries) (int64, error) {
 	var n sql.NullInt64
 	if err := tx.QueryRow("SELECT MAX(id) FROM messages").Scan(&n); err != nil {
 		return 0, fmt.Errorf("reading next message id: %w", err)
@@ -794,7 +794,7 @@ func multiRowPlaceholders(rows, cols int) string {
 }
 
 func insertToolCallsChunkTx(
-	tx *sql.Tx, calls []ToolCall,
+	tx transactionQueries, calls []ToolCall,
 ) error {
 	args := make([]any, 0, len(calls)*12)
 	for _, tc := range calls {
@@ -828,7 +828,7 @@ func insertToolCallsChunkTx(
 }
 
 func insertToolResultEventsChunkTx(
-	tx *sql.Tx, rows []toolResultEventRow,
+	tx transactionQueries, rows []toolResultEventRow,
 ) error {
 	args := make([]any, 0, len(rows)*12)
 	for _, r := range rows {
@@ -877,7 +877,7 @@ func nilIfZero(n int) any {
 // insertToolCallsTx batch-inserts tool calls within an
 // existing transaction.
 func insertToolCallsTx(
-	tx *sql.Tx, calls []ToolCall,
+	tx transactionQueries, calls []ToolCall,
 ) error {
 	for start := 0; start < len(calls); start += toolCallInsertRowsPerStmt {
 		end := min(start+toolCallInsertRowsPerStmt, len(calls))
@@ -889,7 +889,7 @@ func insertToolCallsTx(
 }
 
 func insertToolResultEventsTx(
-	tx *sql.Tx, rows []toolResultEventRow,
+	tx transactionQueries, rows []toolResultEventRow,
 ) error {
 	for start := 0; start < len(rows); start += toolResultEventInsertRowsPerStmt {
 		end := min(start+toolResultEventInsertRowsPerStmt, len(rows))
@@ -1269,7 +1269,7 @@ func replaceSessionMessagesTx(
 	return restorePinsTx(tx, sessionID, pins)
 }
 
-func bumpTranscriptRevisionTx(tx *sql.Tx, sessionID string) error {
+func bumpTranscriptRevisionTx(tx transactionQueries, sessionID string) error {
 	// Advancing the revision also revokes secret-scan freshness in the same
 	// transaction: the mutated transcript has content the recorded scan
 	// never saw, and consumers that require a current scan (extraction's
@@ -1305,7 +1305,7 @@ func bumpTranscriptRevisionTx(tx *sql.Tx, sessionID string) error {
 	return nil
 }
 
-func sessionHasFTSTx(tx *sql.Tx) (bool, error) {
+func sessionHasFTSTx(tx transactionQueries) (bool, error) {
 	var ftsCount int
 	if err := tx.QueryRow(
 		`SELECT count(*) FROM sqlite_master
@@ -1317,7 +1317,7 @@ func sessionHasFTSTx(tx *sql.Tx) (bool, error) {
 }
 
 func deleteSessionMessageRowsTx(
-	tx *sql.Tx, sessionID string,
+	tx transactionQueries, sessionID string,
 ) error {
 	hasFTS, err := sessionHasFTSTx(tx)
 	if err != nil {
@@ -1354,7 +1354,7 @@ func deleteSessionMessageRowsTx(
 	return nil
 }
 
-func deleteSessionMessagesTx(tx *sql.Tx, sessionID string) error {
+func deleteSessionMessagesTx(tx transactionQueries, sessionID string) error {
 	if _, err := tx.Exec(
 		"DELETE FROM tool_calls WHERE session_id = ?",
 		sessionID,
@@ -1462,7 +1462,7 @@ func (db *DB) ReplaceSessionContent(
 }
 
 func updateSessionAutomationFromMessagesTx(
-	tx *sql.Tx, sessionID string,
+	tx transactionQueries, sessionID string,
 ) error {
 	want, rowAutomated, ok, err := sessionAutomationStateTx(
 		tx, sessionID,
@@ -1477,7 +1477,7 @@ func updateSessionAutomationFromMessagesTx(
 }
 
 func setSessionAutomationFromMessagesTx(
-	tx *sql.Tx, sessionID string,
+	tx transactionQueries, sessionID string,
 ) error {
 	want, rowAutomated, ok, err := sessionAutomationStateTx(
 		tx, sessionID,
@@ -1489,7 +1489,7 @@ func setSessionAutomationFromMessagesTx(
 }
 
 func sessionAutomationStateTx(
-	tx *sql.Tx, sessionID string,
+	tx transactionQueries, sessionID string,
 ) (want, rowAutomated, ok bool, err error) {
 	var (
 		firstMessage     sql.NullString
@@ -1535,7 +1535,7 @@ func sessionAutomationStateTx(
 }
 
 func setSessionAutomationTx(
-	tx *sql.Tx, sessionID string, isAutomated bool,
+	tx transactionQueries, sessionID string, isAutomated bool,
 ) error {
 	if _, err := tx.Exec(`
 		UPDATE sessions
@@ -1552,7 +1552,7 @@ func setSessionAutomationTx(
 	return nil
 }
 
-func savePinsTx(tx *sql.Tx, sessionID string) ([]savedPin, error) {
+func savePinsTx(tx transactionQueries, sessionID string) ([]savedPin, error) {
 	// Save existing pins before deletion. The ON DELETE CASCADE on
 	// pinned_messages.message_id would otherwise wipe them when
 	// messages are deleted below. source_uuid comes from the joined
@@ -1638,7 +1638,7 @@ func savePinsTx(tx *sql.Tx, sessionID string) ([]savedPin, error) {
 }
 
 func restorePinsTx(
-	tx *sql.Tx, sessionID string, pins []savedPin,
+	tx transactionQueries, sessionID string, pins []savedPin,
 ) error {
 	// Re-attach saved pins only when the old and new message identities
 	// are both unambiguous. A unique source_uuid may move to another
@@ -1666,7 +1666,7 @@ func restorePinsTx(
 }
 
 func restorePinBySourceUUIDTx(
-	tx *sql.Tx, sessionID string, sp savedPin,
+	tx transactionQueries, sessionID string, sp savedPin,
 ) error {
 	if sp.sourceUUIDCount == 1 {
 		res, err := tx.Exec(`
@@ -1755,7 +1755,7 @@ func restorePinBySourceUUIDTx(
 // edit to the pinned message itself — means the pinned message can no
 // longer be identified and the pin is dropped.
 func restoreLegacyPinByRankTx(
-	tx *sql.Tx, sessionID string, sp savedPin,
+	tx transactionQueries, sessionID string, sp savedPin,
 ) error {
 	_, err := tx.Exec(`
 		INSERT OR IGNORE INTO pinned_messages

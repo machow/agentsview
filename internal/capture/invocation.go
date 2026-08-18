@@ -346,6 +346,7 @@ func runChild(
 	} else {
 		cmd.Stdout = io.MultiWriter(marker, streams.Stdout)
 	}
+	configureChildProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		completed := time.Now().UTC()
 		outcome.CompletedAt = &completed

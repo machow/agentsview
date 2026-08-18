@@ -2493,17 +2493,28 @@ func (db *DB) SetSessionDataVersion(id string, version int) error {
 // listed session. This is used when several session rows represent one source:
 // either every member becomes current, or all remain eligible for retry.
 func (db *DB) SetSessionDataVersions(ids []string, version int) error {
-	return db.setSessionDataVersions(ids, version, true)
+	return db.SetSessionDataVersionsContext(
+		context.Background(), ids, version,
+	)
+}
+
+// SetSessionDataVersionsContext stamps parser versions within ctx.
+func (db *DB) SetSessionDataVersionsContext(
+	ctx context.Context, ids []string, version int,
+) error {
+	return db.setSessionDataVersions(ctx, ids, version, true)
 }
 
 // SetExistingSessionDataVersions atomically stamps every listed session that
 // already exists, ignoring IDs that have not been inserted yet.
 func (db *DB) SetExistingSessionDataVersions(ids []string, version int) error {
-	return db.setSessionDataVersions(ids, version, false)
+	return db.setSessionDataVersions(
+		context.Background(), ids, version, false,
+	)
 }
 
 func (db *DB) setSessionDataVersions(
-	ids []string, version int, requireAll bool,
+	ctx context.Context, ids []string, version int, requireAll bool,
 ) error {
 	if err := db.requireWritable(); err != nil {
 		return err
@@ -2514,13 +2525,14 @@ func (db *DB) setSessionDataVersions(
 
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	tx, err := db.getWriter().Begin()
+	tx, err := db.getWriter().BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning data version update: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	for _, id := range ids {
-		result, err := tx.Exec(
+		result, err := tx.ExecContext(
+			ctx,
 			`UPDATE sessions SET
 				data_version = ?,
 				local_modified_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -2884,7 +2896,7 @@ func (db *DB) UpdateSessionIncremental(
 // A bare UpsertSession or an append-only write must not, or the
 // suppression self-heals prematurely and still-present skew reappears as
 // spurious drift.
-func resetIncrementalMarkerTx(tx *sql.Tx, sessionID string) error {
+func resetIncrementalMarkerTx(tx transactionQueries, sessionID string) error {
 	if _, err := tx.Exec(
 		`UPDATE sessions SET last_write_incremental = 0 WHERE id = ?`,
 		sessionID,

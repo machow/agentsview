@@ -8789,8 +8789,8 @@ func (e *Engine) collectAndBatchWithOptions(
 							e.idPrefix, pending[j].sess.ID,
 						))
 					}
-					if err := e.db.SetSessionDataVersions(
-						ids, db.CurrentDataVersion(),
+					if err := e.db.SetSessionDataVersionsContext(
+						ctx, ids, db.CurrentDataVersion(),
 					); err != nil {
 						log.Printf(
 							"complete provider source data versions: %v", err,
@@ -14252,7 +14252,7 @@ func (e *Engine) writeBatchWithOutcomeContext(
 	if ctx.Err() != nil {
 		return outcome
 	}
-	if writeMode == syncWriteBulk {
+	if writeMode == syncWriteBulk || e.discardWritesOnCancel {
 		return e.writeBatchBulkWithOutcomeContext(ctx, batch, forceReplace)
 	}
 	resolveWorktreeProject := e.loadWorktreeProjectResolverContext(ctx)
@@ -15343,7 +15343,7 @@ func (e *Engine) writeBatchBulkWithOutcomeContext(
 	}
 
 	tWrite := time.Now()
-	result, err := e.db.WriteSessionBatch(writes)
+	result, err := e.db.WriteSessionBatchContext(ctx, writes)
 	e.phaseStats.WriteNanos.Add(int64(time.Since(tWrite)))
 	e.phaseStats.Batches.Add(1)
 	e.phaseStats.WriteBatchSize.Add(int64(len(writes)))

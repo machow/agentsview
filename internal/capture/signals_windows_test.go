@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func captureHelperProcessGroupID() int { return 0 }
+
 func TestRelayWindowsSignalsForwardsRepeatedInterrupts(t *testing.T) {
 	signals := make(chan os.Signal, 2)
 	done := make(chan struct{})

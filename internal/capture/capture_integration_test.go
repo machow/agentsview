@@ -1660,7 +1660,11 @@ func captureTestHelper() {
 		fmt.Fprintln(os.Stdout, "child stdout")
 		fmt.Fprintln(os.Stderr, "child stderr")
 		if mode == "claude-wait-signal" {
-			_ = os.WriteFile(os.Getenv("AGENTSVIEW_CAPTURE_TEST_SIGNAL_MARKER"), []byte("ready"), 0o600)
+			_ = os.WriteFile(
+				os.Getenv("AGENTSVIEW_CAPTURE_TEST_SIGNAL_MARKER"),
+				[]byte(fmt.Sprint(captureHelperProcessGroupID())),
+				0o600,
+			)
 			for {
 				time.Sleep(time.Hour)
 			}

@@ -5,9 +5,14 @@ package capture
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 )
+
+func configureChildProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
 
 func forwardSignals(process *os.Process) func() {
 	ch := make(chan os.Signal, 2)
@@ -17,7 +22,9 @@ func forwardSignals(process *os.Process) func() {
 		for {
 			select {
 			case sig := <-ch:
-				_ = process.Signal(sig)
+				if unixSignal, ok := sig.(syscall.Signal); ok {
+					_ = syscall.Kill(-process.Pid, unixSignal)
+				}
 			case <-done:
 				return
 			}

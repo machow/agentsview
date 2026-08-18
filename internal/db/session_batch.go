@@ -42,6 +42,35 @@ type SessionBatchResult struct {
 	Errors           []error
 }
 
+type contextTransaction struct {
+	ctx context.Context
+	tx  *sql.Tx
+}
+
+func (tx contextTransaction) Exec(
+	query string, args ...any,
+) (sql.Result, error) {
+	return tx.tx.ExecContext(tx.ctx, query, args...)
+}
+
+func (tx contextTransaction) Query(
+	query string, args ...any,
+) (*sql.Rows, error) {
+	return tx.tx.QueryContext(tx.ctx, query, args...)
+}
+
+func (tx contextTransaction) QueryRow(
+	query string, args ...any,
+) *sql.Row {
+	return tx.tx.QueryRowContext(tx.ctx, query, args...)
+}
+
+type transactionQueries interface {
+	Exec(string, ...any) (sql.Result, error)
+	Query(string, ...any) (*sql.Rows, error)
+	QueryRow(string, ...any) *sql.Row
+}
+
 // WriteSessionBatch writes multiple complete sessions inside
 // one transaction. Each session is wrapped in a savepoint so a
 // single bad row rolls back only that session and does not
@@ -51,6 +80,15 @@ type SessionBatchResult struct {
 // are no user pins to preserve yet. Use ReplaceSessionMessages
 // for ordinary single-session replacement on a live database.
 func (db *DB) WriteSessionBatch(
+	writes []SessionBatchWrite,
+) (SessionBatchResult, error) {
+	return db.WriteSessionBatchContext(context.Background(), writes)
+}
+
+// WriteSessionBatchContext writes a full-session batch while bounding every
+// transaction query and write with ctx.
+func (db *DB) WriteSessionBatchContext(
+	ctx context.Context,
 	writes []SessionBatchWrite,
 ) (SessionBatchResult, error) {
 	var result SessionBatchResult
@@ -64,17 +102,18 @@ func (db *DB) WriteSessionBatch(
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	tx, err := db.getWriter().Begin()
+	tx, err := db.getWriter().BeginTx(ctx, nil)
 	if err != nil {
 		return result, fmt.Errorf("beginning batch tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	ctxTx := contextTransaction{ctx: ctx, tx: tx}
 	var pendingRecallRevocations recallEvidenceRevocationEvents
 
 	for i, write := range writes {
 		write = sanitizeSessionBatchWrite(write)
 		savepoint := fmt.Sprintf("session_batch_%d", i)
-		if _, err := tx.Exec("SAVEPOINT " + savepoint); err != nil {
+		if _, err := ctxTx.Exec("SAVEPOINT " + savepoint); err != nil {
 			return result, fmt.Errorf(
 				"creating savepoint %s: %w", savepoint, err,
 			)
@@ -82,13 +121,13 @@ func (db *DB) WriteSessionBatch(
 
 		var sessionRecallRevocations recallEvidenceRevocationEvents
 		messagesWritten, err := writeOneSessionBatchTx(
-			tx,
+			ctx, tx, ctxTx,
 			write,
 			&sessionRecallRevocations,
 		)
 		switch {
 		case err == nil:
-			if _, err := tx.Exec("RELEASE SAVEPOINT " + savepoint); err != nil {
+			if _, err := ctxTx.Exec("RELEASE SAVEPOINT " + savepoint); err != nil {
 				return result, fmt.Errorf(
 					"releasing savepoint %s: %w",
 					savepoint, err,
@@ -103,7 +142,7 @@ func (db *DB) WriteSessionBatch(
 			result.WrittenIndexes = append(result.WrittenIndexes, i)
 		case errors.Is(err, ErrSessionExcluded),
 			errors.Is(err, ErrSessionTrashed):
-			if rerr := rollbackSavepoint(tx, savepoint); rerr != nil {
+			if rerr := rollbackSavepoint(ctxTx, savepoint); rerr != nil {
 				return result, rerr
 			}
 			result.ExcludedSessions++
@@ -112,7 +151,7 @@ func (db *DB) WriteSessionBatch(
 				write.Session.ID,
 			)
 		default:
-			if rerr := rollbackSavepoint(tx, savepoint); rerr != nil {
+			if rerr := rollbackSavepoint(ctxTx, savepoint); rerr != nil {
 				return result, rerr
 			}
 			result.FailedSessions++
@@ -121,6 +160,9 @@ func (db *DB) WriteSessionBatch(
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if err := tx.Commit(); err != nil {
 		return result, fmt.Errorf("committing batch tx: %w", err)
 	}
@@ -156,7 +198,7 @@ func (db *DB) WriteSessionBatchAtomic(
 	for i, write := range writes {
 		write = sanitizeSessionBatchWrite(write)
 		messagesWritten, err := writeOneSessionBatchTx(
-			tx,
+			context.Background(), tx, tx,
 			write,
 			&pendingRecallRevocations,
 		)
@@ -281,7 +323,7 @@ func batchUsageEventTokenTotals(
 	return totalOut, hasOut, peakCtx, hasCtx
 }
 
-func rollbackSavepoint(tx *sql.Tx, savepoint string) error {
+func rollbackSavepoint(tx transactionQueries, savepoint string) error {
 	if _, err := tx.Exec("ROLLBACK TO SAVEPOINT " + savepoint); err != nil {
 		return fmt.Errorf(
 			"rolling back savepoint %s: %w", savepoint, err,
@@ -297,7 +339,9 @@ func rollbackSavepoint(tx *sql.Tx, savepoint string) error {
 }
 
 func writeOneSessionBatchTx(
+	ctx context.Context,
 	tx *sql.Tx,
+	queries transactionQueries,
 	write SessionBatchWrite,
 	pendingRecallRevocations *recallEvidenceRevocationEvents,
 ) (int, error) {
@@ -321,9 +365,9 @@ func writeOneSessionBatchTx(
 	}
 
 	upsertResult, err := upsertSessionExec(
-		tx.Exec,
+		queries.Exec,
 		func(query string, args ...any) rowScanner {
-			return tx.QueryRow(query, args...)
+			return queries.QueryRow(query, args...)
 		},
 		write.Session,
 		true,
@@ -334,7 +378,7 @@ func writeOneSessionBatchTx(
 	replaceMessages := write.ReplaceMessages ||
 		upsertResult.sourceMissing
 	queueGenerationBefore, queueExistedBefore, err := artifactExportGenerationTx(
-		tx, write.Session.ID,
+		queries, write.Session.ID,
 	)
 	if err != nil {
 		return 0, err
@@ -343,7 +387,7 @@ func writeOneSessionBatchTx(
 	replacementTranscriptChanged := false
 	if replaceMessages && sessionExists {
 		stored, err := sessionMessagesTx(
-			context.Background(), tx, write.Session.ID,
+			ctx, tx, write.Session.ID,
 		)
 		if err != nil {
 			return 0, err
@@ -356,12 +400,12 @@ func writeOneSessionBatchTx(
 	if write.IdentityObservation.Project != "" {
 		var err error
 		if write.IdentitySnapshotProject == nil {
-			err = upsertProjectIdentityObservationTx(
-				tx, write.IdentityObservation,
+			err = upsertProjectIdentityObservationTxContext(
+				ctx, tx, write.IdentityObservation,
 			)
 		} else {
-			err = upsertProjectIdentityObservationWithSnapshotProjectTx(
-				tx, write.IdentityObservation,
+			err = upsertProjectIdentityObservationWithSnapshotProjectTxContext(
+				ctx, tx, write.IdentityObservation,
 				*write.IdentitySnapshotProject,
 				upsertResult.inserted, true,
 			)
@@ -373,7 +417,7 @@ func writeOneSessionBatchTx(
 	if !upsertResult.inserted &&
 		upsertResult.previousProject != upsertResult.currentProject {
 		if err := reconcileSessionProjectIdentityAggregatesTx(
-			context.Background(), tx, write.Session.ID,
+			ctx, tx, write.Session.ID,
 			[]string{
 				upsertResult.previousProject,
 				upsertResult.currentProject,
@@ -383,7 +427,7 @@ func writeOneSessionBatchTx(
 		}
 	}
 	if err := replaceSessionUsageEventsTx(
-		tx, write.Session.ID, write.UsageEvents, false,
+		queries, write.Session.ID, write.UsageEvents, false,
 	); err != nil {
 		return 0, err
 	}
@@ -391,15 +435,15 @@ func writeOneSessionBatchTx(
 	msgs := write.Messages
 	var pins []savedPin
 	if replaceMessages && sessionExists {
-		pins, err = savePinsTx(tx, write.Session.ID)
+		pins, err = savePinsTx(queries, write.Session.ID)
 		if err != nil {
 			return 0, err
 		}
-		if err := deleteSessionMessagesTx(tx, write.Session.ID); err != nil {
+		if err := deleteSessionMessagesTx(queries, write.Session.ID); err != nil {
 			return 0, err
 		}
 	} else {
-		maxOrd, err := maxOrdinalTx(tx, write.Session.ID)
+		maxOrd, err := maxOrdinalTx(queries, write.Session.ID)
 		if err != nil {
 			return 0, err
 		}
@@ -411,27 +455,27 @@ func writeOneSessionBatchTx(
 	}
 
 	if len(msgs) > 0 {
-		ids, err := insertMessagesTx(tx, msgs)
+		ids, err := insertMessagesTx(queries, msgs)
 		if err != nil {
 			return 0, err
 		}
 		toolCalls := resolveToolCalls(msgs, ids)
-		if err := insertToolCallsTx(tx, toolCalls); err != nil {
+		if err := insertToolCallsTx(queries, toolCalls); err != nil {
 			return 0, err
 		}
 		events := resolveToolResultEvents(msgs)
-		if err := insertToolResultEventsTx(tx, events); err != nil {
+		if err := insertToolResultEventsTx(queries, events); err != nil {
 			return 0, err
 		}
 	}
 	if transcriptChanged {
-		if err := bumpTranscriptRevisionTx(tx, write.Session.ID); err != nil {
+		if err := bumpTranscriptRevisionTx(queries, write.Session.ID); err != nil {
 			return 0, err
 		}
 	}
 	if replaceMessages && sessionExists {
 		if err := reconcileRecallEvidenceForSessionTx(
-			context.Background(),
+			ctx,
 			tx,
 			write.Session.ID,
 			pendingRecallRevocations,
@@ -441,7 +485,7 @@ func writeOneSessionBatchTx(
 	}
 	if replaceMessages {
 		if err := restorePinsTx(
-			tx, write.Session.ID, pins,
+			queries, write.Session.ID, pins,
 		); err != nil {
 			return 0, err
 		}
@@ -449,18 +493,18 @@ func writeOneSessionBatchTx(
 		// no longer incremental-append skew. The append-only branch
 		// (ReplaceMessages=false) deliberately leaves the marker untouched so
 		// earlier incrementally written rows stay flagged for parse-diff.
-		if err := resetIncrementalMarkerTx(tx, write.Session.ID); err != nil {
+		if err := resetIncrementalMarkerTx(queries, write.Session.ID); err != nil {
 			return 0, err
 		}
 	}
 	if err := updateSessionAutomationFromMessagesTx(
-		tx, write.Session.ID,
+		queries, write.Session.ID,
 	); err != nil {
 		return 0, err
 	}
 
 	if write.DataVersion > 0 {
-		if _, err := tx.Exec(
+		if _, err := queries.Exec(
 			`UPDATE sessions SET
 				data_version = ?,
 				local_modified_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -475,16 +519,16 @@ func writeOneSessionBatchTx(
 	}
 
 	if !write.SkipSignalUpdates {
-		if err := updateSessionSignalsTx(tx, write.Session.ID, write.Signals); err != nil {
+		if err := updateSessionSignalsTx(queries, write.Session.ID, write.Signals); err != nil {
 			return 0, err
 		}
-		if err := replaceSecretFindingsTx(tx, write.Session.ID, write.Findings,
+		if err := replaceSecretFindingsTx(queries, write.Session.ID, write.Findings,
 			write.Signals.SecretLeakCount, write.Signals.SecretsRulesVersion); err != nil {
 			return 0, err
 		}
 	}
 	if err := enqueueArtifactExportIfGenerationUnchangedTx(
-		tx, write.Session.ID, queueGenerationBefore, queueExistedBefore,
+		queries, write.Session.ID, queueGenerationBefore, queueExistedBefore,
 	); err != nil {
 		return 0, err
 	}
@@ -520,7 +564,7 @@ func sessionMessagesTx(
 	return msgs, nil
 }
 
-func maxOrdinalTx(tx *sql.Tx, sessionID string) (int, error) {
+func maxOrdinalTx(tx transactionQueries, sessionID string) (int, error) {
 	var n sql.NullInt64
 	err := tx.QueryRow(
 		"SELECT MAX(ordinal) FROM messages WHERE session_id = ?",

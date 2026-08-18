@@ -4,8 +4,11 @@ package capture
 
 import (
 	"os"
+	"os/exec"
 	"os/signal"
 )
+
+func configureChildProcess(*exec.Cmd) {}
 
 func forwardSignals(process *os.Process) func() {
 	ch := make(chan os.Signal, 2)

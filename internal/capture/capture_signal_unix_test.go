@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -46,9 +47,13 @@ func TestInterruptedChildStillSealsRecoverableUsage(t *testing.T) {
 		done <- response{outcome: outcome, err: err}
 	}()
 	markerDeadline := time.After(2 * time.Second)
+	childProcessGroup := 0
 	for {
-		if _, err := os.Stat(marker); err == nil {
-			break
+		if data, err := os.ReadFile(marker); err == nil {
+			if group, parseErr := strconv.Atoi(string(data)); parseErr == nil {
+				childProcessGroup = group
+				break
+			}
 		}
 		select {
 		case early := <-done:
@@ -58,6 +63,7 @@ func TestInterruptedChildStillSealsRecoverableUsage(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	assert.NotEqual(t, syscall.Getpgrp(), childProcessGroup)
 	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
 
 	var got response
@@ -82,4 +88,8 @@ func TestInterruptedChildStillSealsRecoverableUsage(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, data, replay.Bytes())
+}
+
+func captureHelperProcessGroupID() int {
+	return syscall.Getpgrp()
 }
