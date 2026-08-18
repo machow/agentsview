@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -95,11 +96,11 @@ func (s *captureState) clearPersistedSourceCopies(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for i := len(directories) - 1; i >= 0; i-- {
+	for _, directory := range slices.Backward(directories) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := os.Remove(directories[i]); err != nil {
+		if err := os.Remove(directory); err != nil {
 			return err
 		}
 	}

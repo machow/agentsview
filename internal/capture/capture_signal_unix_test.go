@@ -196,7 +196,9 @@ func captureHelperWaitForSignal(mode, marker string) {
 	case "claude-ignore-signal":
 		signal.Ignore(os.Interrupt, syscall.SIGTERM)
 	}
-	_ = os.WriteFile(marker, []byte(fmt.Sprint(captureHelperProcessGroupID())), 0o600)
+	_ = os.WriteFile(
+		marker, fmt.Appendf(nil, "%d", captureHelperProcessGroupID()), 0o600,
+	)
 	if ch != nil {
 		<-ch
 		_ = os.WriteFile(

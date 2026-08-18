@@ -46,9 +46,7 @@ func forwardSignals(process *os.Process) func() (string, int) {
 		}
 		_ = syscall.Kill(-process.Pid, syscall.SIGKILL)
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case sig := <-ch:
@@ -64,7 +62,7 @@ func forwardSignals(process *os.Process) func() (string, int) {
 				}
 			}
 		}
-	}()
+	})
 	return func() (string, int) {
 		signal.Stop(ch)
 		close(done)
