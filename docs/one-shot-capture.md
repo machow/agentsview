@@ -19,6 +19,10 @@ Other non-interactive producers need a future adapter that can prove exact
 session identity and finality. AgentsView deliberately does not guess from a
 process ID, the newest transcript, or a time-window scan.
 
+On Windows, the producer command must resolve to a native executable.
+AgentsView rejects `.cmd` and `.bat` shims because they cannot preserve an
+untrusted argument boundary safely.
+
 Each supported command must start a fresh provider session. Claude continuation,
 resume, fork, pull-request resume, and teleport options are rejected. Codex
 `exec resume` is also rejected because its transcript includes usage from work

@@ -336,7 +336,13 @@ func runChild(
 ) (ExecutionOutcome, int, bool, error) {
 	started := time.Now().UTC()
 	outcome := ExecutionOutcome{StartedAt: started}
-	cmd := exec.Command(argv[0], argv[1:]...)
+	command, err := resolveChildCommand(argv[0])
+	if err != nil {
+		completed := time.Now().UTC()
+		outcome.CompletedAt = &completed
+		return outcome, 0, false, fmt.Errorf("starting producer: %w", err)
+	}
+	cmd := exec.Command(command, argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdin = streams.Stdin
@@ -353,7 +359,7 @@ func runChild(
 		return outcome, 0, false, fmt.Errorf("starting producer: %w", err)
 	}
 	stopForwarding := forwardSignals(cmd.Process)
-	err := cmd.Wait()
+	err = cmd.Wait()
 	wrapperSignal, wrapperSignalCode := stopForwarding()
 	if marker != nil {
 		marker.finish()

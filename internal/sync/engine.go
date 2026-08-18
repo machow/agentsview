@@ -9240,7 +9240,7 @@ flush:
 			stats.RecordFailed()
 		}
 	}
-	if err := e.db.RepairQueuedSubagentParents(); err != nil {
+	if err := e.db.RepairQueuedSubagentParentsContext(ctx); err != nil {
 		log.Printf("repair queued subagent parents: %v", err)
 		stats.RecordFailed()
 	}
@@ -9433,7 +9433,7 @@ func (e *Engine) linkSubagentSessions(ctx context.Context) error {
 	if runtimeMetrics := reconciliationRuntimeMetricsFor(ctx); runtimeMetrics != nil {
 		runtimeMetrics.globalLinkPass()
 	}
-	return e.db.LinkSubagentSessions()
+	return e.db.LinkSubagentSessionsContext(ctx)
 }
 
 // drainResults consumes remaining items from the results

@@ -1796,9 +1796,15 @@ const linkSubagentSessionsQuery = `
 // use LinkSubagentSessionsForSessions instead, which further bounds the
 // pass to the changed batch.
 func (db *DB) LinkSubagentSessions() error {
+	return db.LinkSubagentSessionsContext(context.Background())
+}
+
+// LinkSubagentSessionsContext is LinkSubagentSessions with caller-controlled
+// cancellation for bounded sync paths.
+func (db *DB) LinkSubagentSessionsContext(ctx context.Context) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	if err := db.repairLegacySelfParentedSessions(); err != nil {
+	if err := db.repairLegacySelfParentedSessions(ctx); err != nil {
 		return err
 	}
 
@@ -1809,7 +1815,7 @@ func (db *DB) LinkSubagentSessions() error {
 	// session after a mirror's cutoff would otherwise never re-push it
 	// (see updateSessionSignalsTx and ReplaceSessionUsageEvents for the
 	// same pattern).
-	_, err := db.getWriter().Exec(linkSubagentSessionsQuery)
+	_, err := db.getWriter().ExecContext(ctx, linkSubagentSessionsQuery)
 	if err != nil {
 		return fmt.Errorf("linking subagent sessions: %w", err)
 	}
@@ -1844,10 +1850,11 @@ const clearSelfParentedSessionsSQL = `
 // of sessions (parent_session_id IS id cannot use idx_sessions_parent), so
 // it is gated by a pg_sync_state marker rather than repeated on every sync.
 // The marker and the clear commit together so a failed run retries.
-func (db *DB) repairLegacySelfParentedSessions() error {
+func (db *DB) repairLegacySelfParentedSessions(ctx context.Context) error {
 	writer := db.getWriter()
 	var repaired int
-	if err := writer.QueryRow(
+	if err := writer.QueryRowContext(
+		ctx,
 		"SELECT EXISTS(SELECT 1 FROM pg_sync_state WHERE key = ?)",
 		selfParentRepairStateKey,
 	).Scan(&repaired); err != nil {
@@ -1856,15 +1863,15 @@ func (db *DB) repairLegacySelfParentedSessions() error {
 	if repaired != 0 {
 		return nil
 	}
-	tx, err := writer.Begin()
+	tx, err := writer.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning self-parent repair: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(clearSelfParentedSessionsSQL); err != nil {
+	if _, err := tx.ExecContext(ctx, clearSelfParentedSessionsSQL); err != nil {
 		return fmt.Errorf("clearing legacy self-parented sessions: %w", err)
 	}
-	if _, err := tx.Exec(`
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO pg_sync_state (key, value) VALUES (?, '1')
 		ON CONFLICT(key) DO NOTHING`, selfParentRepairStateKey); err != nil {
 		return fmt.Errorf("recording self-parent repair state: %w", err)
@@ -2056,11 +2063,17 @@ func (db *DB) queueSubagentParentRepairs(ids []string, cleanup bool) error {
 // back both the hierarchy changes and queue deletion so a later sync retries
 // the exact IDs even when their original spawn edges have disappeared.
 func (db *DB) RepairQueuedSubagentParents() error {
+	return db.RepairQueuedSubagentParentsContext(context.Background())
+}
+
+// RepairQueuedSubagentParentsContext is RepairQueuedSubagentParents with
+// caller-controlled cancellation for bounded sync paths.
+func (db *DB) RepairQueuedSubagentParentsContext(ctx context.Context) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	var pending int
-	err := db.getWriter().QueryRow(`
+	err := db.getWriter().QueryRowContext(ctx, `
 		SELECT EXISTS(SELECT 1 FROM subagent_parent_repair_queue)
 		    OR EXISTS(SELECT 1 FROM subagent_parent_cleanup_queue)
 		    OR EXISTS(SELECT 1 FROM pg_sync_state WHERE key = ?)`,
@@ -2072,16 +2085,16 @@ func (db *DB) RepairQueuedSubagentParents() error {
 	if pending == 0 {
 		return nil
 	}
-	tx, err := db.getWriter().Begin()
+	tx, err := db.getWriter().BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning queued subagent parent repair: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := migrateLegacySubagentParentRepairQueueTx(tx); err != nil {
+	if err := migrateLegacySubagentParentRepairQueueTx(ctx, tx); err != nil {
 		return err
 	}
 	for {
-		rows, err := tx.Query(`
+		rows, err := tx.QueryContext(ctx, `
 			SELECT session_id FROM subagent_parent_repair_queue
 			UNION
 			SELECT session_id FROM subagent_parent_cleanup_queue
@@ -2110,7 +2123,7 @@ func (db *DB) RepairQueuedSubagentParents() error {
 		chunk := ids
 		ph, args := inPlaceholders(chunk)
 		allArgs := append(append([]any{}, args...), args...)
-		if _, err := tx.Exec(
+		if _, err := tx.ExecContext(ctx,
 			linkSubagentSessionsForSessionsQuery(ph), allArgs...,
 		); err != nil {
 			return fmt.Errorf(
@@ -2120,7 +2133,7 @@ func (db *DB) RepairQueuedSubagentParents() error {
 		}
 		cleanupSeeds := `(SELECT session_id
 			FROM subagent_parent_cleanup_queue WHERE session_id IN ` + ph + `)`
-		if _, err := tx.Exec(
+		if _, err := tx.ExecContext(ctx,
 			clearDanglingSubagentParentQuery(cleanupSeeds), args...,
 		); err != nil {
 			return fmt.Errorf(
@@ -2129,7 +2142,7 @@ func (db *DB) RepairQueuedSubagentParents() error {
 				len(chunk), err,
 			)
 		}
-		if _, err := tx.Exec(
+		if _, err := tx.ExecContext(ctx,
 			"DELETE FROM subagent_parent_cleanup_queue WHERE session_id IN "+ph,
 			args...,
 		); err != nil {
@@ -2138,7 +2151,7 @@ func (db *DB) RepairQueuedSubagentParents() error {
 				len(chunk), err,
 			)
 		}
-		if _, err := tx.Exec(
+		if _, err := tx.ExecContext(ctx,
 			"DELETE FROM subagent_parent_repair_queue WHERE session_id IN "+ph,
 			args...,
 		); err != nil {
@@ -2154,9 +2167,11 @@ func (db *DB) RepairQueuedSubagentParents() error {
 	return nil
 }
 
-func migrateLegacySubagentParentRepairQueueTx(tx *sql.Tx) error {
+func migrateLegacySubagentParentRepairQueueTx(
+	ctx context.Context, tx *sql.Tx,
+) error {
 	var encoded string
-	err := tx.QueryRow(
+	err := tx.QueryRowContext(ctx,
 		"SELECT value FROM pg_sync_state WHERE key = ?",
 		subagentParentRepairQueueStateKey,
 	).Scan(&encoded)
@@ -2170,14 +2185,14 @@ func migrateLegacySubagentParentRepairQueueTx(tx *sql.Tx) error {
 	if err := json.Unmarshal([]byte(encoded), &ids); err != nil {
 		return fmt.Errorf("decoding legacy subagent parent repair queue: %w", err)
 	}
-	repairStmt, err := tx.Prepare(`
+	repairStmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO subagent_parent_repair_queue (session_id) VALUES (?)
 		ON CONFLICT(session_id) DO NOTHING`)
 	if err != nil {
 		return fmt.Errorf("preparing legacy subagent parent repair migration: %w", err)
 	}
 	defer repairStmt.Close()
-	cleanupStmt, err := tx.Prepare(`
+	cleanupStmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO subagent_parent_cleanup_queue (session_id) VALUES (?)
 		ON CONFLICT(session_id) DO NOTHING`)
 	if err != nil {
@@ -2188,19 +2203,19 @@ func migrateLegacySubagentParentRepairQueueTx(tx *sql.Tx) error {
 		if id == "" {
 			continue
 		}
-		if _, err := repairStmt.Exec(id); err != nil {
+		if _, err := repairStmt.ExecContext(ctx, id); err != nil {
 			return fmt.Errorf("migrating legacy subagent parent repair for %s: %w", id, err)
 		}
 		// The JSON queue predates generic post-write and attempted-session
 		// seeds; every legacy ID was captured before a destructive write and
 		// therefore carries cleanup intent.
-		if _, err := cleanupStmt.Exec(id); err != nil {
+		if _, err := cleanupStmt.ExecContext(ctx, id); err != nil {
 			return fmt.Errorf(
 				"migrating legacy subagent parent cleanup for %s: %w", id, err,
 			)
 		}
 	}
-	if _, err := tx.Exec(
+	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM pg_sync_state WHERE key = ?",
 		subagentParentRepairQueueStateKey,
 	); err != nil {
