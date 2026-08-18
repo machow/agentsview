@@ -4,7 +4,9 @@ package parser
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -79,6 +81,13 @@ func claudeParseWithExclusions(
 func claudeParseFile(
 	path, project, machine string, opts claudeParseOptions,
 ) ([]ParseResult, []string, error) {
+	ctx := opts.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("stat %s: %w", path, err)
@@ -94,7 +103,10 @@ func claudeParseFile(
 	// message.
 	var lineage *claudeLineagePlan
 	if opts.siblingLineage {
-		lineage = claudeResolveSiblingLineage(path)
+		lineage, err = claudeResolveSiblingLineage(ctx, path)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	f, err := os.Open(path)
@@ -134,10 +146,13 @@ func claudeParseFile(
 		parentSessionID = lineage.parentSessionID
 	}
 
-	lr := newLineReader(f, maxLineSize)
+	lr := newLineReaderContext(ctx, f, maxLineSize)
 	defer releaseLineReader(lr)
 	lastLineFailed := false
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		lineBytes, ok := lr.nextBytes()
 		if !ok {
 			break
@@ -260,9 +275,12 @@ func claudeParseFile(
 		if entryType != "user" && entryType != "assistant" {
 			continue
 		}
-		line := resolveClaudePersistedToolResults(
-			path, compactClaudeEntry(lineBytes),
+		line, err := resolveClaudePersistedToolResultsContext(
+			ctx, path, compactClaudeEntry(lineBytes),
 		)
+		if err != nil {
+			return nil, nil, err
+		}
 
 		// Collect subagent links and cwd/gitBranch from user entries.
 		if entryType == "user" {
@@ -1954,25 +1972,37 @@ func splitCleanPath(path string) []string {
 }
 
 func resolveClaudePersistedToolResults(sessionPath, line string) string {
+	resolved, _ := resolveClaudePersistedToolResultsContext(
+		context.Background(), sessionPath, line,
+	)
+	return resolved
+}
+
+func resolveClaudePersistedToolResultsContext(
+	ctx context.Context, sessionPath, line string,
+) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if !strings.Contains(line, "persisted-output") &&
 		!strings.Contains(line, "persistedOutputPath") {
-		return line
+		return line, nil
 	}
 
 	dec := json.NewDecoder(strings.NewReader(line))
 	dec.UseNumber()
 	var top map[string]any
 	if err := dec.Decode(&top); err != nil {
-		return line
+		return line, nil
 	}
 
 	msg, ok := top["message"].(map[string]any)
 	if !ok {
-		return line
+		return line, nil
 	}
 	blocks, ok := msg["content"].([]any)
 	if !ok {
-		return line
+		return line, nil
 	}
 
 	persistedPath := ""
@@ -2001,7 +2031,12 @@ func resolveClaudePersistedToolResults(sessionPath, line string) string {
 		if path == "" {
 			continue
 		}
-		output, ok := readClaudePersistedToolResult(sessionPath, path)
+		output, ok, err := readClaudePersistedToolResultContext(
+			ctx, sessionPath, path,
+		)
+		if err != nil {
+			return "", err
+		}
 		if !ok {
 			continue
 		}
@@ -2009,14 +2044,14 @@ func resolveClaudePersistedToolResults(sessionPath, line string) string {
 		changed = true
 	}
 	if !changed {
-		return line
+		return line, nil
 	}
 
 	encoded, err := json.Marshal(top)
 	if err != nil {
-		return line
+		return line, nil
 	}
-	return string(encoded)
+	return string(encoded), nil
 }
 
 func countClaudeToolResultBlocks(blocks []any) int {
@@ -2045,33 +2080,51 @@ func persistedOutputPathFromContent(content string) string {
 func readClaudePersistedToolResult(
 	sessionPath, resultPath string,
 ) (string, bool) {
+	output, ok, _ := readClaudePersistedToolResultContext(
+		context.Background(), sessionPath, resultPath,
+	)
+	return output, ok
+}
+
+func readClaudePersistedToolResultContext(
+	ctx context.Context, sessionPath, resultPath string,
+) (string, bool, error) {
 	if resultPath == "" {
-		return "", false
+		return "", false, nil
 	}
 	if !filepath.IsAbs(resultPath) {
-		return "", false
+		return "", false, nil
 	}
 	cleanResult := filepath.Clean(resultPath)
 	for _, dir := range claudeToolResultDirs(sessionPath) {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
 		if !pathWithinDir(cleanResult, dir) {
 			continue
 		}
 		f, err := os.Open(cleanResult)
 		if err != nil {
-			return "", false
+			return "", false, nil
 		}
-		b, readErr := io.ReadAll(io.LimitReader(f, maxPersistedToolResultSize+1))
+		b, readErr := io.ReadAll(io.LimitReader(
+			checkedContextReader{ctx: ctx, reader: f}, maxPersistedToolResultSize+1,
+		))
 		closeErr := f.Close()
+		if errors.Is(readErr, context.Canceled) ||
+			errors.Is(readErr, context.DeadlineExceeded) {
+			return "", false, readErr
+		}
 		if readErr != nil || closeErr != nil {
-			return "", false
+			return "", false, nil
 		}
 		if len(b) > maxPersistedToolResultSize {
 			b = b[:maxPersistedToolResultSize]
 			b = append(b, "\n\n[agentsview: persisted tool result truncated at 16 MiB]"...)
 		}
-		return string(b), true
+		return string(b), true, nil
 	}
-	return "", false
+	return "", false, nil
 }
 
 func claudeToolResultDirs(sessionPath string) []string {

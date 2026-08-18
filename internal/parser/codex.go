@@ -2,6 +2,7 @@ package parser
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1475,6 +1476,14 @@ func IsCodexExecSessionFile(path string) bool {
 func (p *codexProvider) parseSession(
 	path, machine string, includeExec bool,
 ) (*ParsedSession, []ParsedMessage, error) {
+	return p.parseSessionContext(
+		context.Background(), path, machine, includeExec,
+	)
+}
+
+func (p *codexProvider) parseSessionContext(
+	ctx context.Context, path, machine string, includeExec bool,
+) (*ParsedSession, []ParsedMessage, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open %s: %w", path, err)
@@ -1484,21 +1493,27 @@ func (p *codexProvider) parseSession(
 	if err != nil {
 		return nil, nil, fmt.Errorf("stat %s: %w", path, err)
 	}
-	return p.parseSessionSnapshot(
-		path, machine, includeExec, f, info,
+	return p.parseSessionSnapshotContext(
+		ctx, path, machine, includeExec, f, info,
 	)
 }
 
 func (p *codexProvider) parentTurnResolver(
-	childPath string,
+	ctx context.Context, childPath string,
 ) codexParentTurnResolver {
 	return func(parentID string) (map[string]struct{}, bool) {
+		if ctx.Err() != nil {
+			return nil, false
+		}
 		parentKey := strings.Join(p.sources.roots, "\x00") + "\x00" + parentID
 		if turnIDs, ok := p.parentTurnCache.GetParent(parentKey); ok {
 			return turnIDs, true
 		}
 		parentPath := ""
 		for _, root := range p.sources.roots {
+			if ctx.Err() != nil {
+				return nil, false
+			}
 			candidate := p.sources.findSourceFile(root, parentID)
 			if candidate == "" || filepath.Clean(candidate) == filepath.Clean(childPath) {
 				continue
@@ -1519,7 +1534,7 @@ func (p *codexProvider) parentTurnResolver(
 		}
 
 		turnIDs := make(map[string]struct{})
-		_, err = readCodexJSONLFrom(parentPath, 0, func(line string) {
+		_, err = readCodexJSONLFromContext(ctx, parentPath, 0, func(line string) {
 			if gjson.Get(line, "type").Str != codexTypeTurnContext {
 				return
 			}
@@ -1534,13 +1549,13 @@ func (p *codexProvider) parentTurnResolver(
 }
 
 func (p *codexProvider) codexParentResolution(
-	childPath string,
+	ctx context.Context, childPath string,
 ) (string, bool) {
-	parentID, resolutionNeeded := CodexReplayParentID(childPath)
+	parentID, resolutionNeeded := codexReplayParentIDContext(ctx, childPath)
 	if parentID == "" || !resolutionNeeded {
 		return "", false
 	}
-	turnIDs, resolved := p.parentTurnResolver(childPath)(parentID)
+	turnIDs, resolved := p.parentTurnResolver(ctx, childPath)(parentID)
 	return parentID, resolved && len(turnIDs) > 0
 }
 
@@ -1549,6 +1564,15 @@ func (p *codexProvider) codexParentResolution(
 // session_meta after subagent lineage metadata. Child-only subagents return no
 // replay parent and remain current without resolving their parent transcript.
 func CodexReplayParentID(childPath string) (string, bool) {
+	return codexReplayParentIDContext(context.Background(), childPath)
+}
+
+func codexReplayParentIDContext(
+	ctx context.Context, childPath string,
+) (string, bool) {
+	if ctx.Err() != nil {
+		return "", false
+	}
 	f, err := os.Open(childPath)
 	if err != nil {
 		return "", false
@@ -1557,9 +1581,12 @@ func CodexReplayParentID(childPath string) (string, bool) {
 
 	parentID := ""
 	resolutionNeeded := false
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(checkedContextReader{ctx: ctx, reader: f})
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
 	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return "", false
+		}
 		line := strings.TrimSpace(scanner.Text())
 		if !gjson.Valid(line) {
 			continue
@@ -1592,16 +1619,30 @@ func CodexReplayParentID(childPath string) (string, bool) {
 // Limiting the reader prevents an append racing the scan from being folded into
 // a cursor keyed by the earlier size.
 func (p *codexProvider) parseSessionSnapshot(
-	path, machine string,
+	path, machine string, includeExec bool, f *os.File, info os.FileInfo,
+) (*ParsedSession, []ParsedMessage, error) {
+	return p.parseSessionSnapshotContext(
+		context.Background(), path, machine, includeExec, f, info,
+	)
+}
+
+func (p *codexProvider) parseSessionSnapshotContext(
+	ctx context.Context, path, machine string,
 	includeExec bool,
 	f *os.File,
 	info os.FileInfo,
 ) (*ParsedSession, []ParsedMessage, error) {
-	lr := newLineReader(io.LimitReader(f, info.Size()), maxLineSize)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	lr := newLineReaderContext(ctx, io.LimitReader(f, info.Size()), maxLineSize)
 	defer releaseLineReader(lr)
-	b := newCodexSessionBuilder(includeExec, p.parentTurnResolver(path))
+	b := newCodexSessionBuilder(includeExec, p.parentTurnResolver(ctx, path))
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		line, ok := lr.next()
 		if !ok {
 			break
@@ -1953,7 +1994,7 @@ func (p *codexProvider) seedCodexIncrementalState(
 	defer f.Close()
 	seed, err := seedCodexIncrementalStateFromReader(
 		io.LimitReader(f, offset),
-		p.parentTurnResolver(path),
+		p.parentTurnResolver(context.Background(), path),
 	)
 	if err != nil {
 		return codexIncrementalSeed{}, fmt.Errorf(
@@ -2079,6 +2120,20 @@ func readCodexJSONLFrom(
 	offset int64,
 	fn func(line string),
 ) (consumed int64, err error) {
+	return readCodexJSONLFromContext(
+		context.Background(), path, offset, fn,
+	)
+}
+
+func readCodexJSONLFromContext(
+	ctx context.Context,
+	path string,
+	offset int64,
+	fn func(line string),
+) (consumed int64, err error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, fmt.Errorf("open %s: %w", path, err)
@@ -2088,7 +2143,7 @@ func readCodexJSONLFrom(
 	if err != nil {
 		return 0, fmt.Errorf("stat %s: %w", path, err)
 	}
-	return readCodexJSONLSection(f, offset, info.Size(), fn)
+	return readCodexJSONLSectionContext(ctx, f, offset, info.Size(), fn)
 }
 
 // readCodexJSONLSection applies the conservative Codex JSONL rules to the
@@ -2100,13 +2155,25 @@ func readCodexJSONLSection(
 	limit int64,
 	fn func(line string),
 ) (consumed int64, err error) {
+	return readCodexJSONLSectionContext(
+		context.Background(), f, offset, limit, fn,
+	)
+}
+
+func readCodexJSONLSectionContext(
+	ctx context.Context,
+	f *os.File,
+	offset int64,
+	limit int64,
+	fn func(line string),
+) (consumed int64, err error) {
 	if offset < 0 || limit < offset {
 		return 0, fmt.Errorf(
 			"invalid codex JSONL section [%d,%d)", offset, limit,
 		)
 	}
 	section := io.NewSectionReader(f, offset, limit-offset)
-	return readCodexJSONLReader(section, section, fn)
+	return readCodexJSONLReaderContext(ctx, section, section, fn)
 }
 
 func readCodexJSONLReader(
@@ -2114,9 +2181,23 @@ func readCodexJSONLReader(
 	at io.ReaderAt,
 	fn func(line string),
 ) (consumed int64, err error) {
-	lr := newLineReader(r, maxLineSize)
+	return readCodexJSONLReaderContext(
+		context.Background(), r, at, fn,
+	)
+}
+
+func readCodexJSONLReaderContext(
+	ctx context.Context,
+	r io.Reader,
+	at io.ReaderAt,
+	fn func(line string),
+) (consumed int64, err error) {
+	lr := newLineReaderContext(ctx, r, maxLineSize)
 	defer releaseLineReader(lr)
 	for {
+		if err := ctx.Err(); err != nil {
+			return consumed, err
+		}
 		line, ok := lr.next()
 		if !ok {
 			break
@@ -2228,7 +2309,7 @@ func (p *codexProvider) parseSessionFromSnapshot(
 		func() (codexIncrementalSeed, error) {
 			return seedCodexIncrementalStateFromReader(
 				io.NewSectionReader(f, 0, offset),
-				p.parentTurnResolver(path),
+				p.parentTurnResolver(context.Background(), path),
 			)
 		},
 	)
@@ -2302,7 +2383,9 @@ func (p *codexProvider) parseSessionFromWithSources(
 		}
 	}
 
-	b := newCodexSessionBuilder(includeExec, p.parentTurnResolver(path))
+	b := newCodexSessionBuilder(
+		includeExec, p.parentTurnResolver(context.Background(), path),
+	)
 	b.ordinal = startOrdinal
 	b.codexCursorState = seed
 	var fallbackErr error

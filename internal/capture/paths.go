@@ -103,10 +103,5 @@ func pathWithin(parent, candidate string) (bool, error) {
 	) {
 		return false, nil
 	}
-	relative, err := filepath.Rel(parent, candidate)
-	if err != nil {
-		return false, fmt.Errorf("comparing paths: %w", err)
-	}
-	return relative == "." || relative != ".." &&
-		!strings.HasPrefix(relative, ".."+string(filepath.Separator)), nil
+	return pathWithinVolume(parent, candidate)
 }
