@@ -112,15 +112,21 @@ func GetSessionUsageRollup(
 func delegatedDescendants(
 	ctx context.Context, store db.Store, rootID string,
 ) ([]db.Session, error) {
+	return delegatedDescendantsFrom(ctx, store, rootID, false)
+}
+
+func delegatedDescendantsFrom(
+	ctx context.Context, store db.Store, rootID string, rootDelegated bool,
+) ([]db.Session, error) {
 	type walkState struct {
 		id        string
 		delegated bool
 	}
 	visited := map[walkState]struct{}{
-		{id: rootID}: {},
+		{id: rootID, delegated: rootDelegated}: {},
 	}
 	included := make(map[string]struct{})
-	queue := []walkState{{id: rootID}}
+	queue := []walkState{{id: rootID, delegated: rootDelegated}}
 	var out []db.Session
 	for len(queue) > 0 {
 		parent := queue[0]

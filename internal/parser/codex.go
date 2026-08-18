@@ -725,11 +725,22 @@ func (b *codexSessionBuilder) hasEquivalentCallResultEvent(
 func (b *codexSessionBuilder) claimPendingAgentEvents(
 	callID, agentID string,
 ) {
+	_ = b.claimPendingAgentEventsContext(
+		context.Background(), callID, agentID,
+	)
+}
+
+func (b *codexSessionBuilder) claimPendingAgentEventsContext(
+	ctx context.Context, callID, agentID string,
+) error {
 	pending := b.pendingAgentEvents[agentID]
 	if len(pending) == 0 {
-		return
+		return ctx.Err()
 	}
-	for _, ev := range pending {
+	for i, ev := range pending {
+		if err := contextErrEvery(ctx, i); err != nil {
+			return err
+		}
 		b.appendCallResultEvent(callID, ParsedToolResultEvent{
 			AgentID:           ev.agentID,
 			SubagentSessionID: codexSubagentSessionID(ev.agentID),
@@ -740,31 +751,55 @@ func (b *codexSessionBuilder) claimPendingAgentEvents(
 		})
 	}
 	delete(b.pendingAgentEvents, agentID)
+	return ctx.Err()
 }
 
 func (b *codexSessionBuilder) flushPendingAgentResults() {
+	_ = b.flushPendingAgentResultsContext(context.Background())
+}
+
+func (b *codexSessionBuilder) flushPendingAgentResultsContext(
+	ctx context.Context,
+) error {
 	if len(b.pendingAgentEvents) == 0 {
-		return
+		return ctx.Err()
 	}
 	agentIDs := make([]string, 0, len(b.pendingAgentEvents))
 	for agentID := range b.pendingAgentEvents {
 		agentIDs = append(agentIDs, agentID)
 	}
 	sort.Strings(agentIDs)
-	for _, agentID := range agentIDs {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for i, agentID := range agentIDs {
+		if err := contextErrEvery(ctx, i); err != nil {
+			return err
+		}
 		pending := b.pendingAgentEvents[agentID]
 		switch {
 		case b.agentWaitCalls[agentID] != "":
-			b.claimPendingAgentEvents(b.agentWaitCalls[agentID], agentID)
+			if err := b.claimPendingAgentEventsContext(
+				ctx, b.agentWaitCalls[agentID], agentID,
+			); err != nil {
+				return err
+			}
 		case b.agentSpawnCalls[agentID] != "":
-			b.claimPendingAgentEvents(b.agentSpawnCalls[agentID], agentID)
+			if err := b.claimPendingAgentEventsContext(
+				ctx, b.agentSpawnCalls[agentID], agentID,
+			); err != nil {
+				return err
+			}
 		default:
-			for _, ev := range pending {
+			for j, ev := range pending {
+				if err := contextErrEvery(ctx, j); err != nil {
+					return err
+				}
 				key := agentID + "\x00" + ev.status + "\x00" + ev.text
 				if _, ok := b.orphanNotificationIx[key]; ok {
 					continue
 				}
-				idx := b.insertMessage(ParsedMessage{
+				idx, err := b.insertMessageContext(ctx, ParsedMessage{
 					Ordinal:       ev.ordinal,
 					Role:          RoleUser,
 					Content:       ev.text,
@@ -772,11 +807,15 @@ func (b *codexSessionBuilder) flushPendingAgentResults() {
 					Model:         b.model,
 					ContentLength: len(ev.text),
 				})
+				if err != nil {
+					return err
+				}
 				b.orphanNotificationIx[key] = idx
 			}
 			delete(b.pendingAgentEvents, agentID)
 		}
 	}
+	return ctx.Err()
 }
 
 func codexSubagentSessionID(agentID string) string {
@@ -791,20 +830,87 @@ func codexSubagentSessionID(agentID string) string {
 }
 
 func (b *codexSessionBuilder) normalizeOrdinals() {
-	sort.SliceStable(b.messages, func(i, j int) bool {
-		if b.messages[i].Ordinal == b.messages[j].Ordinal {
-			return i < j
+	_ = b.normalizeOrdinalsContext(context.Background())
+}
+
+func (b *codexSessionBuilder) normalizeOrdinalsContext(
+	ctx context.Context,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(b.messages) > 1 {
+		if err := stableSortCodexMessagesContext(ctx, b.messages); err != nil {
+			return err
 		}
-		return b.messages[i].Ordinal < b.messages[j].Ordinal
-	})
+	}
 	for i := range b.messages {
+		if err := contextErrEvery(ctx, i); err != nil {
+			return err
+		}
 		b.messages[i].Ordinal = i
 	}
+	return ctx.Err()
+}
+
+func stableSortCodexMessagesContext(
+	ctx context.Context, messages []ParsedMessage,
+) error {
+	scratch := make([]ParsedMessage, len(messages))
+	source, destination := messages, scratch
+	sourceIsMessages := true
+	steps := 0
+	for width := 1; width < len(messages); width *= 2 {
+		for left := 0; left < len(messages); left += 2 * width {
+			if err := contextErrEvery(ctx, steps); err != nil {
+				return err
+			}
+			steps++
+			middle := min(left+width, len(messages))
+			right := min(left+2*width, len(messages))
+			i, j, out := left, middle, left
+			for i < middle && j < right {
+				if err := contextErrEvery(ctx, steps); err != nil {
+					return err
+				}
+				steps++
+				if source[i].Ordinal <= source[j].Ordinal {
+					destination[out] = source[i]
+					i++
+				} else {
+					destination[out] = source[j]
+					j++
+				}
+				out++
+			}
+			out += copy(destination[out:right], source[i:middle])
+			copy(destination[out:right], source[j:right])
+		}
+		source, destination = destination, source
+		sourceIsMessages = !sourceIsMessages
+		if width > len(messages)/2 {
+			break
+		}
+	}
+	if !sourceIsMessages {
+		copy(messages, source)
+	}
+	return ctx.Err()
 }
 
 func (b *codexSessionBuilder) insertMessage(msg ParsedMessage) int {
+	idx, _ := b.insertMessageContext(context.Background(), msg)
+	return idx
+}
+
+func (b *codexSessionBuilder) insertMessageContext(
+	ctx context.Context, msg ParsedMessage,
+) (int, error) {
 	idx := len(b.messages)
 	for i, existing := range b.messages {
+		if err := contextErrEvery(ctx, i); err != nil {
+			return 0, err
+		}
 		if existing.Ordinal > msg.Ordinal ||
 			(existing.Ordinal == msg.Ordinal &&
 				!msg.Timestamp.IsZero() &&
@@ -818,12 +924,15 @@ func (b *codexSessionBuilder) insertMessage(msg ParsedMessage) int {
 	copy(b.messages[idx+1:], b.messages[idx:])
 	b.messages[idx] = msg
 	for callID, ref := range b.callRefs {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		if ref.messageIndex >= idx {
 			ref.messageIndex++
 			b.callRefs[callID] = ref
 		}
 	}
-	return idx
+	return idx, ctx.Err()
 }
 
 func formatCodexFunctionCall(
@@ -1660,8 +1769,12 @@ func (p *codexProvider) parseSessionSnapshotContext(
 			fmt.Errorf("reading codex %s: %w", path, err)
 	}
 
-	b.flushPendingAgentResults()
-	b.normalizeOrdinals()
+	if err := b.flushPendingAgentResultsContext(ctx); err != nil {
+		return nil, nil, err
+	}
+	if err := b.normalizeOrdinalsContext(ctx); err != nil {
+		return nil, nil, err
+	}
 	inode, device := sourceFileIdentity(info)
 	if safe, safeErr := codexSafeResumeOffsetFile(f, info.Size()); safeErr == nil && safe {
 		p.cursorCache.Put(
@@ -1682,7 +1795,10 @@ func (p *codexProvider) parseSessionSnapshotContext(
 	sessionID = "codex:" + sessionID
 
 	userCount := 0
-	for _, m := range b.messages {
+	for i, m := range b.messages {
+		if err := contextErrEvery(ctx, i); err != nil {
+			return nil, nil, err
+		}
 		if m.Role == RoleUser && m.Content != "" {
 			userCount++
 		}
@@ -1731,9 +1847,11 @@ func (p *codexProvider) parseSessionSnapshotContext(
 		},
 	}
 
-	accumulateMessageTokenUsage(sess, b.messages)
+	if err := accumulateMessageTokenUsageContext(ctx, sess, b.messages); err != nil {
+		return nil, nil, err
+	}
 
-	return sess, b.messages, nil
+	return sess, b.messages, ctx.Err()
 }
 
 // CodexSessionIndexFilename is the name of the Codex index file that maps

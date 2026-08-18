@@ -38,12 +38,82 @@ import (
 func SessionUsageWithSubagents(
 	ctx context.Context, store db.Store, rootID string, includeBreakdown bool,
 ) (*db.SessionUsage, error) {
-	root, err := store.GetSessionUsage(ctx, rootID, includeBreakdown)
-	if err != nil || root == nil {
-		return nil, err
-	}
 	descendants, err := delegatedDescendants(ctx, store, rootID)
 	if err != nil {
+		return nil, err
+	}
+	return sessionUsageWithDescendants(
+		ctx, store, rootID, descendants, includeBreakdown,
+	)
+}
+
+// SessionUsageWithRequiredSubagents applies the canonical delegated-usage
+// rollup while requiring each supplied provider source to contribute. The
+// caller must prove those IDs from provider-owned evidence, such as Claude's
+// subagent directory. This keeps incomplete producer link metadata from
+// dropping billed child usage without weakening ordinary archive traversal.
+func SessionUsageWithRequiredSubagents(
+	ctx context.Context,
+	store db.Store,
+	rootID string,
+	requiredIDs []string,
+	includeBreakdown bool,
+) (*db.SessionUsage, []db.Session, error) {
+	descendants, err := delegatedDescendants(ctx, store, rootID)
+	if err != nil {
+		return nil, nil, err
+	}
+	included := make(map[string]struct{}, len(descendants)+len(requiredIDs))
+	for _, descendant := range descendants {
+		included[descendant.ID] = struct{}{}
+	}
+	for _, id := range requiredIDs {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if id == "" || id == rootID {
+			return nil, nil, fmt.Errorf("invalid required subagent session %q", id)
+		}
+		if _, ok := included[id]; !ok {
+			session, err := store.GetSession(ctx, id)
+			if err != nil {
+				return nil, nil, err
+			}
+			if session == nil {
+				return nil, nil, fmt.Errorf(
+					"required subagent session %q was not ingested", id)
+			}
+			session.RelationshipType = "subagent"
+			descendants = append(descendants, *session)
+			included[id] = struct{}{}
+		}
+		nested, err := delegatedDescendantsFrom(ctx, store, id, true)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, descendant := range nested {
+			if _, ok := included[descendant.ID]; ok {
+				continue
+			}
+			descendants = append(descendants, descendant)
+			included[descendant.ID] = struct{}{}
+		}
+	}
+	usage, err := sessionUsageWithDescendants(
+		ctx, store, rootID, descendants, includeBreakdown,
+	)
+	return usage, descendants, err
+}
+
+func sessionUsageWithDescendants(
+	ctx context.Context,
+	store db.Store,
+	rootID string,
+	descendants []db.Session,
+	includeBreakdown bool,
+) (*db.SessionUsage, error) {
+	root, err := store.GetSessionUsage(ctx, rootID, includeBreakdown)
+	if err != nil || root == nil {
 		return nil, err
 	}
 	if len(descendants) == 0 {

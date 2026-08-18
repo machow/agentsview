@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"time"
@@ -1331,8 +1332,21 @@ func accumulateMessageTokenUsage(
 	sess *ParsedSession,
 	messages []ParsedMessage,
 ) {
+	_ = accumulateMessageTokenUsageContext(
+		context.Background(), sess, messages,
+	)
+}
+
+func accumulateMessageTokenUsageContext(
+	ctx context.Context,
+	sess *ParsedSession,
+	messages []ParsedMessage,
+) error {
 	sess.aggregateTokenPresenceKnown = true
-	for _, m := range messages {
+	for i, m := range messages {
+		if err := contextErrEvery(ctx, i); err != nil {
+			return err
+		}
 		if m.HasOutputTokens {
 			sess.HasTotalOutputTokens = true
 			sess.TotalOutputTokens += m.OutputTokens
@@ -1344,6 +1358,7 @@ func accumulateMessageTokenUsage(
 			}
 		}
 	}
+	return ctx.Err()
 }
 
 // applyUsageEventTokenTotals recomputes session token totals from the

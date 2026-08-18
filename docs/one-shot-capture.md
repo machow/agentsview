@@ -292,7 +292,7 @@ The result's `reporting.reason` is a closed value:
 | `correlation_conflict` | Codex emitted conflicting thread IDs | Preserve the capture directory and producer output; do not choose either session |
 | `source_limit` | The exact delegated source tree exceeded its file or entry bound | Preserve the directory and reduce the producer fan-out |
 | `source_bytes_limit` | A source, JSONL line, or aggregate exceeded its byte bound | Preserve the directory and inspect producer output size |
-| `source_unavailable` | An exact source was observed but disappeared before a complete copy, or persisted evidence no longer matches its bundle | Preserve the capture directory; restore the source if possible and retry `capture report` |
+| `source_unavailable` | An exact source disappeared, persisted evidence no longer matches, or a Claude child reference has no captured transcript | Preserve the capture directory; restore the missing source if possible and retry `capture report` |
 | `ingest_failed` | Exact-path parsing or isolated SQLite accounting failed | Keep the capture directory and report the producer and AgentsView versions |
 
 Failure envelopes never contain transcript text, prompts, responses, source
@@ -310,7 +310,9 @@ provider-relative JSONL files and `bundle.json`, whose closed schema is
 provider session ID with an `application/jsonl` raw-source reference containing
 a relative path, SHA-256 hash, and byte count. Claude subagent IDs use the
 provider's `agent-...` identity from the transcript filename; they are not
-UUIDs. Consumers must reject unknown bundle schema names, versions, fields,
+UUIDs. Every captured Claude subagent contributes to usage even when an
+interrupted producer did not flush its parent-link record. Consumers must
+reject unknown bundle schema names, versions, fields,
 media types, unsafe paths, or mismatched hashes. The bundle contains transcript
 content and is not safe to publish with the usage JSON. AgentsView keeps
 `sources/` after sealing and never removes it automatically.

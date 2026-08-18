@@ -2,11 +2,13 @@ package parser
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,4 +79,38 @@ func TestClaudeCanceledHeadSniffIsNotCached(t *testing.T) {
 	assert.True(t, sniff.ok)
 	assert.True(t, sniff.rootIsBG)
 	assert.Equal(t, "root", sniff.rootUUID)
+}
+
+func TestClaudeDAGPostProcessingStopsAfterContextCancellation(t *testing.T) {
+	entries := make([]dagEntry, 1024)
+	for i := range entries {
+		parent := ""
+		if i > 0 {
+			parent = fmt.Sprintf("entry-%d", i-1)
+		}
+		entries[i] = dagEntry{
+			uuid: fmt.Sprintf("entry-%d", i), parentUuid: parent,
+			entryType: "user", line: `{"type":"user","message":{"content":"x"}}`,
+		}
+	}
+	ctx := newCancelOnErrCheckContext(t, 2)
+
+	_, err := parseDAG(
+		ctx, entries, "session", "project", "machine", "",
+		FileInfo{}, nil, time.Time{}, time.Time{}, claudeSessionMeta{},
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestCodexPostReadNormalizationStopsAfterContextCancellation(t *testing.T) {
+	builder := newCodexSessionBuilder(false, nil)
+	for i := 1024; i > 0; i-- {
+		builder.messages = append(builder.messages, ParsedMessage{Ordinal: i})
+	}
+	ctx := newCancelOnErrCheckContext(t, 3)
+
+	err := builder.normalizeOrdinalsContext(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
 }

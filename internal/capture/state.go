@@ -24,6 +24,7 @@ const (
 	stagingDirName   = ".source-staging"
 	manifestVersion  = 2
 	minResultBytes   = 64 << 10
+	maxManifestBytes = 256 << 10
 )
 
 var errAttemptExists = errors.New("capture failure result already exists")
@@ -259,7 +260,7 @@ func readCaptureManifest(dir string) (manifest, error) {
 	if err != nil {
 		return manifest{}, fmt.Errorf("reading capture manifest: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Size() > int64(DefaultLimits().MaxResultBytes) {
+	if !info.Mode().IsRegular() || info.Size() > maxManifestBytes {
 		return manifest{}, errors.New("capture manifest is not a bounded regular file")
 	}
 	if err := verifyCapturePathOwner(path); err != nil {
@@ -412,12 +413,35 @@ func (s *captureState) saveManifest() error {
 }
 
 func (s *captureState) saveManifestContext(ctx context.Context) error {
-	data, err := json.MarshalIndent(s.manifest, "", "  ")
+	data, err := encodeManifest(s.manifest)
 	if err != nil {
-		return fmt.Errorf("encoding capture manifest: %w", err)
+		return err
+	}
+	return atomicWriteContext(ctx, s.manifestPath(), data)
+}
+
+func encodeManifest(value manifest) ([]byte, error) {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encoding capture manifest: %w", err)
 	}
 	data = append(data, '\n')
-	return atomicWriteContext(ctx, s.manifestPath(), data)
+	if len(data) > maxManifestBytes {
+		return nil, errorWithReason(
+			ReasonSourceLimit,
+			"capture manifest exceeds recovery size limit",
+		)
+	}
+	return data, nil
+}
+
+func (s *captureState) validateManifestSources(
+	sources []TranscriptSource,
+) error {
+	prospective := s.manifest
+	prospective.Sources = sources
+	_, err := encodeManifest(prospective)
+	return err
 }
 
 func (s *captureState) seal(data []byte) error {

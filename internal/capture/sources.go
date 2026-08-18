@@ -619,18 +619,93 @@ func loadCapturedUsage(
 		}
 		return nil, nil, nil, err
 	}
-	usage, err := service.SessionUsageWithSubagents(ctx, database, rootID, true)
+	var usage *db.SessionUsage
+	var descendants []db.Session
+	if Provider(state.manifest.Provider) == ProviderClaude {
+		required := capturedClaudeSubagentIDs(state.manifest.Sources, rootID)
+		usage, descendants, err = service.SessionUsageWithRequiredSubagents(
+			ctx, database, rootID, required, true,
+		)
+		if err == nil {
+			err = validateClaudeSubagentReferences(
+				ctx, database, rootID, descendants, required,
+			)
+		}
+	} else {
+		usage, err = service.SessionUsageWithSubagents(ctx, database, rootID, true)
+		if err == nil {
+			descendants, err = service.DelegatedUsageSessions(ctx, database, rootID)
+		}
+	}
 	if err != nil || usage == nil {
 		if err == nil {
 			err = errors.New("usage is unavailable")
 		}
 		return nil, nil, nil, err
 	}
-	descendants, err := service.DelegatedUsageSessions(ctx, database, rootID)
-	if err != nil {
-		return nil, nil, nil, err
-	}
 	return root, usage, descendants, nil
+}
+
+func capturedClaudeSubagentIDs(
+	sources []TranscriptSource, rootID string,
+) []string {
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		if source.SessionID == "" || source.SessionID == rootID ||
+			!strings.Contains(source.RawSource.Path, "/subagents/") {
+			continue
+		}
+		seen[source.SessionID] = struct{}{}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func validateClaudeSubagentReferences(
+	ctx context.Context,
+	database *db.DB,
+	rootID string,
+	descendants []db.Session,
+	capturedIDs []string,
+) error {
+	captured := make(map[string]struct{}, len(capturedIDs))
+	for _, id := range capturedIDs {
+		captured[id] = struct{}{}
+	}
+	sessionIDs := make([]string, 0, len(descendants)+1)
+	sessionIDs = append(sessionIDs, rootID)
+	for _, descendant := range descendants {
+		sessionIDs = append(sessionIDs, descendant.ID)
+	}
+	for _, sessionID := range sessionIDs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		messages, err := database.GetAllMessages(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		for _, message := range messages {
+			for _, call := range message.ToolCalls {
+				childID := call.SubagentSessionID
+				if childID == "" || childID == sessionID {
+					continue
+				}
+				if _, ok := captured[childID]; !ok {
+					return errorWithReason(
+						ReasonSourceUnavailable,
+						fmt.Sprintf(
+							"exact Claude child source %q is unavailable", childID),
+					)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (c *ingestedCapture) close(ctx context.Context) error {

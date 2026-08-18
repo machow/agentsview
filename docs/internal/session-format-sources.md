@@ -220,9 +220,11 @@ Grok section and remove the explicit registry exception in the coverage test.
   letters, digits, and `-` and replaces every other character with `-`. The
   transcript existed before process exit, so an interrupted wrapper can retain
   exact recovery evidence. One-shot capture copies the exact root and bounded
-  subagent tree after an unchanged-file interval and reports parser termination
-  separately as assurance; an interrupted transcript can still contain usable
-  token records.
+  subagent tree after an unchanged-file interval, requires every persisted
+  child reference to have a captured transcript, and includes every captured
+  subagent file even when interruption prevented its link record from being
+  flushed. Parser termination remains separate assurance; an interrupted
+  transcript can still contain usable token records.
 
 ## OpenClaude (`openclaude`)
 

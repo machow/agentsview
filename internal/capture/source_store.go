@@ -151,11 +151,15 @@ func (s *captureState) persistSourcePaths(
 		prospective = replaceTranscriptSource(prospective, TranscriptSource{
 			SessionID: sourceSessionID(Provider(s.manifest.Provider), snapshot.Path),
 			RawSource: artifact.RawSourceRef{
-				Size: snapshot.Size, Path: bundlePath,
+				Hash: strings.Repeat("0", sha256.Size*2),
+				Size: snapshot.Size, MediaType: "application/jsonl", Path: bundlePath,
 			},
 		})
 	}
 	if err := validatePersistedSourceBounds(prospective, s.manifest.Limits); err != nil {
+		return persistedSourceSet{}, err
+	}
+	if err := s.validateManifestSources(prospective); err != nil {
 		return persistedSourceSet{}, err
 	}
 	paths := make([]string, 0, len(snapshots))

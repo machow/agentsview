@@ -1453,6 +1453,53 @@ func TestClaudeCaptureUsesCanonicalDelegatedUsageWithoutDoubleCounting(t *testin
 	assertIntPointer(t, result.Usage.OutputTokens, 15)
 }
 
+func TestClaudeCaptureIncludesChildWithoutFlushedLinkMetadata(t *testing.T) {
+	root := t.TempDir()
+	resultPath := filepath.Join(t.TempDir(), "result.json")
+	producer := copyCaptureHelper(t, "claude")
+	_, err := Run(context.Background(), RunOptions{
+		Provider: ProviderClaude, OccurrenceID: "unlinked-child",
+		CaptureDir: filepath.Join(t.TempDir(), "capture"), ResultPath: resultPath,
+		ProviderRoot: root, WorkDir: t.TempDir(),
+		Command:     []string{producer, "-p", "prompt"},
+		Environment: helperEnvironment(root, "claude-unlinked-subagent", 0),
+		Streams:     Streams{Stdout: io.Discard, Stderr: io.Discard},
+		Limits:      testLimits(), CustomPricing: testPricing(),
+	})
+	require.NoError(t, err)
+	data, err := os.ReadFile(resultPath)
+	require.NoError(t, err)
+	result, err := DecodeResult(bytes.NewReader(data))
+	require.NoError(t, err)
+	assert.Contains(t, result.Provider.IncludedSessionIDs, "agent-abc123")
+	require.NotNil(t, result.Usage)
+	assertIntPointer(t, result.Usage.InputTokens, 30)
+	assertIntPointer(t, result.Usage.OutputTokens, 15)
+}
+
+func TestClaudeCaptureRejectsMissingReferencedChild(t *testing.T) {
+	root := t.TempDir()
+	resultPath := filepath.Join(t.TempDir(), "result.json")
+	producer := copyCaptureHelper(t, "claude")
+	outcome, err := Run(context.Background(), RunOptions{
+		Provider: ProviderClaude, OccurrenceID: "missing-child",
+		CaptureDir: filepath.Join(t.TempDir(), "capture"), ResultPath: resultPath,
+		ProviderRoot: root, WorkDir: t.TempDir(),
+		Command:     []string{producer, "-p", "prompt"},
+		Environment: helperEnvironment(root, "claude-missing-subagent", 0),
+		Streams:     Streams{Stdout: io.Discard, Stderr: io.Discard},
+		Limits:      testLimits(), CustomPricing: testPricing(),
+	})
+	require.Error(t, err)
+	assert.Equal(t, ReportFailureExitCode, outcome.ExitCode)
+	data, readErr := os.ReadFile(resultPath)
+	require.NoError(t, readErr)
+	result, decodeErr := DecodeResult(bytes.NewReader(data))
+	require.NoError(t, decodeErr)
+	assert.Equal(t, ReasonSourceUnavailable, result.Reporting.Reason)
+	assert.Nil(t, result.Usage)
+}
+
 func TestClaudeCaptureRetryDropsRemovedSubagentUsage(t *testing.T) {
 	root := t.TempDir()
 	workDir := t.TempDir()
@@ -1738,14 +1785,21 @@ func captureTestHelper() {
 		path := filepath.Join(root, encodeClaudeWorkDir(cwd), sessionID+".jsonl")
 		_ = os.MkdirAll(filepath.Dir(path), 0o700)
 		lines := claudeHelperLines(sessionID, cwd, mode == "claude-unfinished")
-		if mode == "claude-subagent" {
+		if mode == "claude-subagent" || mode == "claude-missing-subagent" ||
+			mode == "claude-unlinked-subagent" {
 			var childLines []string
 			lines, childLines = claudeSubagentHelperLines(sessionID, cwd)
-			childPath := filepath.Join(
-				strings.TrimSuffix(path, ".jsonl"), "subagents", "agent-abc123.jsonl",
-			)
-			_ = os.MkdirAll(filepath.Dir(childPath), 0o700)
-			_ = os.WriteFile(childPath, []byte(strings.Join(childLines, "\n")+"\n"), 0o600)
+			if mode == "claude-unlinked-subagent" {
+				lines = append(lines[:2], lines[3:]...)
+			}
+			if mode != "claude-missing-subagent" {
+				childPath := filepath.Join(
+					strings.TrimSuffix(path, ".jsonl"), "subagents", "agent-abc123.jsonl",
+				)
+				_ = os.MkdirAll(filepath.Dir(childPath), 0o700)
+				_ = os.WriteFile(
+					childPath, []byte(strings.Join(childLines, "\n")+"\n"), 0o600)
+			}
 		}
 		_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 		if mode == "claude-many-sources" {

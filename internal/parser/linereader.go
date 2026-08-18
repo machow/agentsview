@@ -11,6 +11,15 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+const contextCheckInterval = 256
+
+func contextErrEvery(ctx context.Context, index int) error {
+	if index%contextCheckInterval == 0 {
+		return ctx.Err()
+	}
+	return nil
+}
+
 // countingReader wraps an io.Reader and counts bytes read.
 type countingReader struct {
 	ctx context.Context
