@@ -2535,10 +2535,13 @@ func extractMessagesContext(
 		ordinal++
 	}
 
-	annotateClaudeWebSearchRequests(
-		messages, collectClaudeWebSearchCounts(entries))
-
-	if err := ctx.Err(); err != nil {
+	webSearchCounts, err := collectClaudeWebSearchCountsContext(ctx, entries)
+	if err != nil {
+		return nil, time.Time{}, time.Time{}, err
+	}
+	if err := annotateClaudeWebSearchRequestsContext(
+		ctx, messages, webSearchCounts,
+	); err != nil {
 		return nil, time.Time{}, time.Time{}, err
 	}
 	return messages, startedAt, endedAt, nil

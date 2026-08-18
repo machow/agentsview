@@ -1403,7 +1403,21 @@ func applyUsageEventTokenTotals(
 func UsageEventTokenAggregate(
 	events []ParsedUsageEvent,
 ) (totalOut int, hasOut bool, peakCtx int, hasCtx bool) {
+	totalOut, hasOut, peakCtx, hasCtx, _ = UsageEventTokenAggregateContext(
+		context.Background(), events,
+	)
+	return
+}
+
+// UsageEventTokenAggregateContext is the bounded form of the canonical
+// event-derived token rollup.
+func UsageEventTokenAggregateContext(
+	ctx context.Context, events []ParsedUsageEvent,
+) (totalOut int, hasOut bool, peakCtx int, hasCtx bool, err error) {
 	for _, ev := range events {
+		if err = ctx.Err(); err != nil {
+			return
+		}
 		if ev.OutputTokens > 0 {
 			hasOut = true
 			totalOut += ev.OutputTokens
@@ -1418,7 +1432,8 @@ func UsageEventTokenAggregate(
 			}
 		}
 	}
-	return totalOut, hasOut, peakCtx, hasCtx
+	err = ctx.Err()
+	return
 }
 
 // InferTokenPresence determines whether context/output tokens were
@@ -1488,13 +1503,27 @@ func (s ParsedSession) AggregateTokenPresence() (bool, bool) {
 func (s ParsedSession) TokenCoverage(
 	msgs []ParsedMessage,
 ) (bool, bool) {
+	hasTotal, hasPeak, _ := s.TokenCoverageContext(
+		context.Background(), msgs,
+	)
+	return hasTotal, hasPeak
+}
+
+// TokenCoverageContext reports aggregate coverage while allowing bounded
+// transcript preparation to stop between messages.
+func (s ParsedSession) TokenCoverageContext(
+	ctx context.Context, msgs []ParsedMessage,
+) (bool, bool, error) {
 	hasTotal, hasPeak := s.AggregateTokenPresence()
 	for _, m := range msgs {
+		if err := ctx.Err(); err != nil {
+			return false, false, err
+		}
 		msgHasCtx, msgHasOut := m.TokenPresence()
 		hasTotal = hasTotal || msgHasOut
 		hasPeak = hasPeak || msgHasCtx
 	}
-	return hasTotal, hasPeak
+	return hasTotal, hasPeak, ctx.Err()
 }
 
 // ParseResult pairs a parsed session with its messages.

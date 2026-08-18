@@ -2,6 +2,7 @@ package parser
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -111,6 +112,62 @@ func TestCodexPostReadNormalizationStopsAfterContextCancellation(t *testing.T) {
 	ctx := newCancelOnErrCheckContext(t, 3)
 
 	err := builder.normalizeOrdinalsContext(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestClaudeWebSearchCollectionStopsAfterContextCancellation(t *testing.T) {
+	entries := make([]dagEntry, 1024)
+	for i := range entries {
+		entries[i] = dagEntry{
+			entryType: "user",
+			line:      `{"message":{"content":[]},"toolUseResult":{"searchCount":1}}`,
+		}
+	}
+
+	_, err := collectClaudeWebSearchCountsContext(
+		newCancelOnErrCheckContext(t, 2), entries,
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestClaudeWebSearchAnnotationStopsAfterContextCancellation(t *testing.T) {
+	messages := make([]ParsedMessage, 1024)
+	for i := range messages {
+		messages[i] = ParsedMessage{
+			TokenUsage: json.RawMessage(`{"input_tokens":1,"output_tokens":1}`),
+			ToolCalls: []ParsedToolCall{{
+				ToolName:  claudeWebSearchToolName,
+				ToolUseID: "search",
+			}},
+		}
+	}
+
+	err := annotateClaudeWebSearchRequestsContext(
+		newCancelOnErrCheckContext(t, 2), messages,
+		map[string]int{"search": 1},
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestUsageEventTokenAggregateStopsAfterContextCancellation(t *testing.T) {
+	events := make([]ParsedUsageEvent, 1024)
+
+	_, _, _, _, err := UsageEventTokenAggregateContext(
+		newCancelOnErrCheckContext(t, 2), events,
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestTokenCoverageStopsAfterContextCancellation(t *testing.T) {
+	messages := make([]ParsedMessage, 1024)
+
+	_, _, err := (ParsedSession{}).TokenCoverageContext(
+		newCancelOnErrCheckContext(t, 2), messages,
+	)
 
 	require.ErrorIs(t, err, context.Canceled)
 }
