@@ -105,7 +105,7 @@ func TestClaudeDAGPostProcessingStopsAfterContextCancellation(t *testing.T) {
 }
 
 func TestCodexPostReadNormalizationStopsAfterContextCancellation(t *testing.T) {
-	builder := newCodexSessionBuilder(false, nil)
+	builder := newCodexSessionBuilder(context.Background(), false, nil)
 	for i := 1024; i > 0; i-- {
 		builder.messages = append(builder.messages, ParsedMessage{Ordinal: i})
 	}

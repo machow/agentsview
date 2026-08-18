@@ -409,6 +409,10 @@ type EngineConfig struct {
 	// DisableSignalRecomputation skips quality and secret signal work. It is
 	// reserved for bounded parsers whose result does not consume those fields.
 	DisableSignalRecomputation bool
+	// DisableFilesystemProjectDiscovery prevents project attribution from
+	// touching working directories recorded in imported transcripts. Bounded
+	// capture uses lexical metadata instead.
+	DisableFilesystemProjectDiscovery bool
 	// Emitter, when non-nil, is called once after each sync pass
 	// that wrote data. Safe to leave nil (e.g., in PG serve mode
 	// where the engine is not run).
@@ -489,15 +493,16 @@ type Engine struct {
 	// idPrefix and pathRewriter support remote sync:
 	// prefix all session IDs to avoid collisions, rewrite
 	// temp paths to "host:/remote/path" form.
-	ephemeral              bool
-	discardWritesOnCancel  bool
-	disableSignalRecompute bool
-	idPrefix               string
-	pathRewriter           func(string) string
-	storedPathResolver     func(string) (string, bool)
-	emitter                Emitter
-	providerFactories      map[parser.AgentType]parser.ProviderFactory
-	providerMigrationModes map[parser.AgentType]parser.ProviderMigrationMode
+	ephemeral               bool
+	discardWritesOnCancel   bool
+	disableSignalRecompute  bool
+	disableProjectDiscovery bool
+	idPrefix                string
+	pathRewriter            func(string) string
+	storedPathResolver      func(string) (string, bool)
+	emitter                 Emitter
+	providerFactories       map[parser.AgentType]parser.ProviderFactory
+	providerMigrationModes  map[parser.AgentType]parser.ProviderMigrationMode
 	// providerStatHashers caches the optional MultiFileStatHasher
 	// implementations keyed by AgentType. Populated at engine
 	// construction by type-asserting each constructed provider; nil
@@ -829,6 +834,7 @@ func NewEngine(
 		ephemeral:               cfg.Ephemeral,
 		discardWritesOnCancel:   cfg.DiscardPendingWritesOnCancel,
 		disableSignalRecompute:  cfg.DisableSignalRecomputation,
+		disableProjectDiscovery: cfg.DisableFilesystemProjectDiscovery,
 		idPrefix:                cfg.IDPrefix,
 		pathRewriter:            cfg.PathRewriter,
 		storedPathResolver:      cfg.StoredPathResolver,
@@ -1587,6 +1593,9 @@ func (e *Engine) applyChangedPathSyncLocked(
 func (e *Engine) SyncPathsContext(ctx context.Context, paths []string) error {
 	if e.refuseWriteInForceParse("SyncPaths") {
 		return nil
+	}
+	if e.disableProjectDiscovery {
+		ctx = parser.WithoutFilesystemProjectDiscovery(ctx)
 	}
 	stats, tombstoned, err := func() (SyncStats, int, error) {
 		e.syncMu.Lock()
@@ -14005,6 +14014,9 @@ func (e *Engine) loadWorktreeProjectResolverContext(
 // Skipping leaves the stored project untouched, which is what an unreachable
 // working directory would produce anyway.
 func (e *Engine) skipSourceProjectProbe(pw *pendingWrite) bool {
+	if e.disableProjectDiscovery {
+		return true
+	}
 	sess := &pw.sess
 	if sess.ID == "" || sess.Cwd == "" || pw.sourceIdentityUnverified {
 		return true
@@ -15562,7 +15574,7 @@ func (e *Engine) cachedProjectIdentity(machine, rootPath string) projectIdentity
 	// automountd/opendirectoryd CPU storm.
 	// mayProbeLocalPath also guards export.NormalizeRootPath below, which
 	// resolves symlinks and would reach into a protected location on its own.
-	if e.idPrefix == "" && e.pathRewriter == nil &&
+	if !e.disableProjectDiscovery && e.idPrefix == "" && e.pathRewriter == nil &&
 		e.isLocalMachineAttribution(machine) && e.mayProbeLocalPath(rootPath) {
 		if normalized, ok, err := export.NormalizeRootPath(rootPath); err == nil && ok {
 			identity.rootPath = normalized

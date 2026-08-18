@@ -70,6 +70,23 @@ func writeCaptureResult(
 	return writeResult(validated, stdout, data)
 }
 
+func invalidateResult(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking existing result: %w", err)
+	}
+	if info.IsDir() {
+		return errors.New("result path is a directory")
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("invalidating existing result: %w", err)
+	}
+	return nil
+}
+
 func resolveProspectivePath(path string) (string, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {

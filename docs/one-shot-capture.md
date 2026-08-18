@@ -271,6 +271,10 @@ agentsview capture report \
   --result ./usage-build-42.json
 ```
 
+`capture run` removes any existing result file before it starts the producer.
+Consumers must still verify that `occurrence_id` matches the requested
+occurrence before accepting or uploading a result.
+
 A completed capture is sealed. Replaying it emits the same bytes. Failed
 recovery attempts emit and preserve the first failure envelope; only a
 reporting-complete retry replaces and seals it. Running a new

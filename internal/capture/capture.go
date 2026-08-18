@@ -181,6 +181,9 @@ func Run(ctx context.Context, opts RunOptions) (RunOutcome, error) {
 		return RunOutcome{}, err
 	}
 	defer state.close()
+	if err := invalidateResult(prepared.resultPath); err != nil {
+		return RunOutcome{}, err
+	}
 
 	streams := defaultStreams(opts.Streams)
 	child := runCaptureChild(state, opts, prepared, streams)

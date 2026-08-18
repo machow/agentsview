@@ -58,6 +58,7 @@ type codexSessionIndexEntry struct {
 // JSONL session file line by line.
 type codexSessionBuilder struct {
 	codexCursorState
+	projectContext       context.Context
 	resolveParentTurns   codexParentTurnResolver
 	parentTurnIDs        map[string]struct{}
 	messages             []ParsedMessage
@@ -184,10 +185,12 @@ type codexPendingEvent struct {
 }
 
 func newCodexSessionBuilder(
+	ctx context.Context,
 	_ bool,
 	resolveParentTurns codexParentTurnResolver,
 ) *codexSessionBuilder {
 	return &codexSessionBuilder{
+		projectContext:       ctx,
 		resolveParentTurns:   resolveParentTurns,
 		project:              "unknown",
 		callNames:            make(map[string]string),
@@ -292,7 +295,9 @@ func (b *codexSessionBuilder) handleSessionMeta(
 	if cwd := payload.Get("cwd").Str; cwd != "" {
 		b.cwd = cwd
 		branch := payload.Get("git.branch").Str
-		if proj := ExtractProjectFromCwdWithBranch(cwd, branch); proj != "" {
+		if proj := ExtractProjectFromCwdWithBranchContext(
+			b.projectContext, cwd, branch,
+		); proj != "" {
 			b.project = proj
 		} else {
 			b.project = "unknown"
@@ -1746,7 +1751,7 @@ func (p *codexProvider) parseSessionSnapshotContext(
 	}
 	lr := newLineReaderContext(ctx, io.LimitReader(f, info.Size()), maxLineSize)
 	defer releaseLineReader(lr)
-	b := newCodexSessionBuilder(includeExec, p.parentTurnResolver(ctx, path))
+	b := newCodexSessionBuilder(ctx, includeExec, p.parentTurnResolver(ctx, path))
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -2126,7 +2131,7 @@ func seedCodexIncrementalStateFromReader(
 	r io.Reader,
 	resolveParentTurns codexParentTurnResolver,
 ) (codexIncrementalSeed, error) {
-	b := newCodexSessionBuilder(false, resolveParentTurns)
+	b := newCodexSessionBuilder(context.Background(), false, resolveParentTurns)
 	lr := newLineReader(r, maxLineSize)
 	defer releaseLineReader(lr)
 	for {
@@ -2502,7 +2507,8 @@ func (p *codexProvider) parseSessionFromWithSources(
 	}
 
 	b := newCodexSessionBuilder(
-		includeExec, p.parentTurnResolver(context.Background(), path),
+		context.Background(), includeExec,
+		p.parentTurnResolver(context.Background(), path),
 	)
 	b.ordinal = startOrdinal
 	b.codexCursorState = seed

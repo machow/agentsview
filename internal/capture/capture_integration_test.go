@@ -117,6 +117,31 @@ func TestRunClaudeProducesExactResultAndPreservesChildOutcome(t *testing.T) {
 	}
 }
 
+func TestRunInvalidatesExistingResultBeforeStartingProducer(t *testing.T) {
+	root := t.TempDir()
+	resultPath := filepath.Join(t.TempDir(), "usage.json")
+	require.NoError(t, os.WriteFile(resultPath, []byte("stale result"), 0o600))
+	env := append(
+		helperEnvironment(root, "claude-final", 0),
+		"AGENTSVIEW_CAPTURE_TEST_RESULT_MUST_BE_ABSENT="+resultPath,
+	)
+
+	_, err := Run(context.Background(), RunOptions{
+		Provider: ProviderClaude, OccurrenceID: "current-occurrence",
+		CaptureDir: filepath.Join(t.TempDir(), "capture"), ResultPath: resultPath,
+		ProviderRoot: root, WorkDir: t.TempDir(),
+		Command:     []string{copyCaptureHelper(t, "claude"), "-p", "prompt"},
+		Environment: env, Streams: Streams{Stdout: io.Discard, Stderr: io.Discard},
+		Limits: testLimits(), CustomPricing: testPricing(),
+	})
+	require.NoError(t, err)
+	data, err := os.ReadFile(resultPath)
+	require.NoError(t, err)
+	result, err := DecodeResult(bytes.NewReader(data))
+	require.NoError(t, err)
+	assert.Equal(t, "current-occurrence", result.OccurrenceID)
+}
+
 func TestReportPricingFailureWritesOrReplaysFailureResult(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1765,6 +1790,12 @@ func captureTestHelper() {
 	mode := os.Getenv("AGENTSVIEW_CAPTURE_TEST_MODE")
 	exitCode := 0
 	_, _ = fmt.Sscanf(os.Getenv("AGENTSVIEW_CAPTURE_TEST_EXIT"), "%d", &exitCode)
+	if path := os.Getenv("AGENTSVIEW_CAPTURE_TEST_RESULT_MUST_BE_ABSENT"); path != "" {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, "result existed when producer started")
+			os.Exit(97)
+		}
+	}
 	if mode == "none" {
 		fmt.Fprintln(os.Stdout, "child stdout")
 		fmt.Fprintln(os.Stderr, "child stderr")

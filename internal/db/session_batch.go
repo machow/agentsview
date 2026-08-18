@@ -111,7 +111,10 @@ func (db *DB) WriteSessionBatchContext(
 	var pendingRecallRevocations recallEvidenceRevocationEvents
 
 	for i, write := range writes {
-		write = sanitizeSessionBatchWrite(write)
+		write, err = sanitizeSessionBatchWriteContext(ctx, write)
+		if err != nil {
+			return result, err
+		}
 		savepoint := fmt.Sprintf("session_batch_%d", i)
 		if _, err := ctxTx.Exec("SAVEPOINT " + savepoint); err != nil {
 			return result, fmt.Errorf(
@@ -242,13 +245,40 @@ func (db *DB) WriteSessionBatchAtomic(
 }
 
 func sanitizeSessionBatchWrite(write SessionBatchWrite) SessionBatchWrite {
-	write.Messages = append([]Message(nil), write.Messages...)
-	write.UsageEvents = append([]UsageEvent(nil), write.UsageEvents...)
+	sanitized, _ := sanitizeSessionBatchWriteContext(context.Background(), write)
+	return sanitized
+}
 
-	msgTotal, msgHasOut, msgPeak, msgHasCtx :=
-		batchMessageTokenTotals(write.Messages)
-	evtTotal, evtHasOut, evtPeak, evtHasCtx :=
-		batchUsageEventTokenTotals(write.UsageEvents)
+func sanitizeSessionBatchWriteContext(
+	ctx context.Context, write SessionBatchWrite,
+) (SessionBatchWrite, error) {
+	messages := write.Messages
+	write.Messages = make([]Message, len(messages))
+	for i := range write.Messages {
+		if err := ctx.Err(); err != nil {
+			return SessionBatchWrite{}, err
+		}
+		write.Messages[i] = messages[i]
+	}
+	usageEvents := write.UsageEvents
+	write.UsageEvents = make([]UsageEvent, len(usageEvents))
+	for i := range write.UsageEvents {
+		if err := ctx.Err(); err != nil {
+			return SessionBatchWrite{}, err
+		}
+		write.UsageEvents[i] = usageEvents[i]
+	}
+
+	msgTotal, msgHasOut, msgPeak, msgHasCtx, err :=
+		batchMessageTokenTotalsContext(ctx, write.Messages)
+	if err != nil {
+		return SessionBatchWrite{}, err
+	}
+	evtTotal, evtHasOut, evtPeak, evtHasCtx, err :=
+		batchUsageEventTokenTotalsContext(ctx, write.UsageEvents)
+	if err != nil {
+		return SessionBatchWrite{}, err
+	}
 	totalFromMsgs := write.Session.HasTotalOutputTokens == msgHasOut &&
 		write.Session.TotalOutputTokens == msgTotal
 	totalFromEvts := write.Session.HasTotalOutputTokens == evtHasOut &&
@@ -258,33 +288,52 @@ func sanitizeSessionBatchWrite(write SessionBatchWrite) SessionBatchWrite {
 	peakFromEvts := write.Session.HasPeakContextTokens == evtHasCtx &&
 		write.Session.PeakContextTokens == evtPeak
 
-	_ = ValidateAndSanitize(&write.Session, write.Messages, write.UsageEvents)
+	if _, err := ValidateAndSanitizeContext(
+		ctx, &write.Session, write.Messages, write.UsageEvents,
+	); err != nil {
+		return SessionBatchWrite{}, err
+	}
 
-	if totalFromMsgs {
-		t, h, _, _ := batchMessageTokenTotals(write.Messages)
-		write.Session.TotalOutputTokens = t
-		write.Session.HasTotalOutputTokens = h
-	} else if totalFromEvts {
-		t, h, _, _ := batchUsageEventTokenTotals(write.UsageEvents)
-		write.Session.TotalOutputTokens = t
-		write.Session.HasTotalOutputTokens = h
+	if totalFromMsgs || peakFromMsgs {
+		total, hasTotal, peak, hasPeak, err :=
+			batchMessageTokenTotalsContext(ctx, write.Messages)
+		if err != nil {
+			return SessionBatchWrite{}, err
+		}
+		if totalFromMsgs {
+			write.Session.TotalOutputTokens = total
+			write.Session.HasTotalOutputTokens = hasTotal
+		}
+		if peakFromMsgs {
+			write.Session.PeakContextTokens = peak
+			write.Session.HasPeakContextTokens = hasPeak
+		}
 	}
-	if peakFromMsgs {
-		_, _, p, h := batchMessageTokenTotals(write.Messages)
-		write.Session.PeakContextTokens = p
-		write.Session.HasPeakContextTokens = h
-	} else if peakFromEvts {
-		_, _, p, h := batchUsageEventTokenTotals(write.UsageEvents)
-		write.Session.PeakContextTokens = p
-		write.Session.HasPeakContextTokens = h
+	if totalFromEvts || peakFromEvts {
+		total, hasTotal, peak, hasPeak, err :=
+			batchUsageEventTokenTotalsContext(ctx, write.UsageEvents)
+		if err != nil {
+			return SessionBatchWrite{}, err
+		}
+		if totalFromEvts {
+			write.Session.TotalOutputTokens = total
+			write.Session.HasTotalOutputTokens = hasTotal
+		}
+		if peakFromEvts {
+			write.Session.PeakContextTokens = peak
+			write.Session.HasPeakContextTokens = hasPeak
+		}
 	}
-	return write
+	return write, nil
 }
 
-func batchMessageTokenTotals(
-	msgs []Message,
-) (totalOut int, hasOut bool, peakCtx int, hasCtx bool) {
+func batchMessageTokenTotalsContext(
+	ctx context.Context, msgs []Message,
+) (totalOut int, hasOut bool, peakCtx int, hasCtx bool, err error) {
 	for _, msg := range msgs {
+		if err := ctx.Err(); err != nil {
+			return 0, false, 0, false, err
+		}
 		if msg.HasOutputTokens {
 			hasOut = true
 			totalOut += msg.OutputTokens
@@ -296,13 +345,16 @@ func batchMessageTokenTotals(
 			}
 		}
 	}
-	return totalOut, hasOut, peakCtx, hasCtx
+	return totalOut, hasOut, peakCtx, hasCtx, ctx.Err()
 }
 
-func batchUsageEventTokenTotals(
-	events []UsageEvent,
-) (totalOut int, hasOut bool, peakCtx int, hasCtx bool) {
+func batchUsageEventTokenTotalsContext(
+	ctx context.Context, events []UsageEvent,
+) (totalOut int, hasOut bool, peakCtx int, hasCtx bool, err error) {
 	for _, ev := range events {
+		if err := ctx.Err(); err != nil {
+			return 0, false, 0, false, err
+		}
 		if ev.Source == "session" {
 			continue
 		}
@@ -320,7 +372,7 @@ func batchUsageEventTokenTotals(
 			}
 		}
 	}
-	return totalOut, hasOut, peakCtx, hasCtx
+	return totalOut, hasOut, peakCtx, hasCtx, ctx.Err()
 }
 
 func rollbackSavepoint(tx transactionQueries, savepoint string) error {

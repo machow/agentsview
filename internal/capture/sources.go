@@ -428,11 +428,12 @@ func openCaptureEngine(
 		AgentDirs: map[parser.AgentType][]string{
 			agent: {state.capturedProviderRoot()},
 		},
-		DisabledAgents:               disabled,
-		Machine:                      "capture",
-		Ephemeral:                    true,
-		DiscardPendingWritesOnCancel: true,
-		DisableSignalRecomputation:   true,
+		DisabledAgents:                    disabled,
+		Machine:                           "capture",
+		Ephemeral:                         true,
+		DiscardPendingWritesOnCancel:      true,
+		DisableSignalRecomputation:        true,
+		DisableFilesystemProjectDiscovery: true,
 	})
 	if err := ctx.Err(); err != nil {
 		engine.Close()

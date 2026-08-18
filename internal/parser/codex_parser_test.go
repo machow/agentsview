@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -503,8 +504,30 @@ func TestParseCodexSession_ExecOriginator(t *testing.T) {
 	})
 }
 
+func TestCodexBuilderCanUseLexicalProjectDiscovery(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repository")
+	cwd := filepath.Join(repo, "recorded-cwd")
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
+	require.NoError(t, os.MkdirAll(cwd, 0o755))
+
+	origGuard := probeGitRootForCwd
+	t.Cleanup(func() { probeGitRootForCwd = origGuard })
+	probeGitRootForCwd = func(string) bool {
+		assert.Fail(t, "Codex lexical attribution must not probe the filesystem")
+		return true
+	}
+
+	ctx := WithoutFilesystemProjectDiscovery(t.Context())
+	builder := newCodexSessionBuilder(ctx, false, nil)
+	builder.handleSessionMeta(gjson.Parse(`{"id":"abc","cwd":`+
+		fmt.Sprintf("%q", cwd)+`}`), time.Time{})
+
+	assert.Equal(t, "recorded_cwd", builder.project)
+}
+
 func TestCodexInsertMessage_PreservesChronologyOnSameOrdinal(t *testing.T) {
-	b := newCodexSessionBuilder(false, nil)
+	b := newCodexSessionBuilder(context.Background(), false, nil)
 	b.messages = []ParsedMessage{{
 		Ordinal:   2,
 		Role:      RoleAssistant,
@@ -634,7 +657,7 @@ func TestParseCodexSession_FunctionCalls(t *testing.T) {
 	t.Run("custom_tool_call_output for a stored call requests full parse", func(t *testing.T) {
 		line := `{"timestamp":"2026-07-08T03:20:43.376Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_abc","output":"Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess."}}`
 
-		b := newCodexSessionBuilder(false, nil)
+		b := newCodexSessionBuilder(context.Background(), false, nil)
 		assert.True(t,
 			b.incrementalOutputNeedsFullParse(gjson.Get(line, "payload")))
 	})
