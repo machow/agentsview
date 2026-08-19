@@ -9239,17 +9239,21 @@ flush:
 			e.poisonSQLiteContainerPass()
 		}
 	}
+	postWriteCtx := ctx
+	if !e.discardWritesOnCancel {
+		postWriteCtx = context.WithoutCancel(ctx)
+	}
 
 	// Link subagent child sessions to their parents via
 	// tool_calls.subagent_session_id references. Run once
 	// after all batches to avoid repeated full-table scans.
 	if deferred, _ := ctx.Value(deferGlobalLinkContextKey{}).(bool); !deferred {
-		if err := e.linkSubagentSessions(ctx); err != nil {
+		if err := e.linkSubagentSessions(postWriteCtx); err != nil {
 			log.Printf("link subagent sessions: %v", err)
 			stats.RecordFailed()
 		}
 	}
-	if err := e.db.RepairQueuedSubagentParentsContext(ctx); err != nil {
+	if err := e.db.RepairQueuedSubagentParentsContext(postWriteCtx); err != nil {
 		log.Printf("repair queued subagent parents: %v", err)
 		stats.RecordFailed()
 	}

@@ -8269,6 +8269,73 @@ func TestCollectAndBatchClearsDanglingParentAfterParserExclusion(t *testing.T) {
 		"bulk exclusion must clear a child parent that no longer exists")
 }
 
+func TestCollectAndBatchCompletesPostWriteLinksAfterCancellation(t *testing.T) {
+	database := openTestDB(t)
+	engine := NewEngine(database, EngineConfig{Machine: "local"})
+	t.Cleanup(engine.Close)
+
+	for _, session := range []db.Session{
+		{ID: "link-parent", Project: "project", Machine: "local", Agent: "zencoder"},
+		{ID: "repair-parent", Project: "project", Machine: "local", Agent: "zencoder"},
+		{ID: "repair-child", Project: "project", Machine: "local", Agent: "zencoder"},
+	} {
+		require.NoError(t, database.UpsertSession(session))
+	}
+	require.NoError(t, database.InsertMessages([]db.Message{
+		{SessionID: "link-parent", Ordinal: 0, Role: "assistant",
+			Content: "spawn link child", HasToolUse: true,
+			ToolCalls: []db.ToolCall{{
+				ToolUseID: "link-call", ToolName: "Task", Category: "Task",
+				SubagentSessionID: "link-child",
+			}}},
+		{SessionID: "repair-parent", Ordinal: 0, Role: "assistant",
+			Content: "spawn repair child", HasToolUse: true,
+			ToolCalls: []db.ToolCall{{
+				ToolUseID: "repair-call", ToolName: "Task", Category: "Task",
+				SubagentSessionID: "repair-child",
+			}}},
+	}))
+	require.NoError(t, database.QueueSubagentParentRepairs([]string{"repair-child"}))
+
+	sourcePath := filepath.Join(t.TempDir(), "link-child.jsonl")
+	results := make(chan syncJob, 1)
+	results <- syncJob{
+		agent: parser.AgentZencoder, path: sourcePath, machine: "local",
+		processResult: processResult{results: []parser.ParseResult{{
+			Session: parser.ParsedSession{
+				ID: "link-child", Project: "project", Machine: "local",
+				Agent: parser.AgentZencoder,
+				File:  parser.FileInfo{Path: sourcePath, Size: 1, Mtime: 1},
+			},
+		}}},
+	}
+	close(results)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	stats := engine.collectAndBatchWithOptions(
+		ctx, results, 1, 1, nil, syncWriteDefault,
+		collectAndBatchOptions{observeResult: func(syncJob) { cancel() }},
+	)
+
+	assert.Equal(t, 1, stats.Synced)
+	linked, err := database.GetSession(t.Context(), "link-child")
+	require.NoError(t, err)
+	require.NotNil(t, linked)
+	require.NotNil(t, linked.ParentSessionID)
+	assert.Equal(t, "link-parent", *linked.ParentSessionID)
+	repaired, err := database.GetSession(t.Context(), "repair-child")
+	require.NoError(t, err)
+	require.NotNil(t, repaired)
+	require.NotNil(t, repaired.ParentSessionID)
+	assert.Equal(t, "repair-parent", *repaired.ParentSessionID)
+	var queued int
+	require.NoError(t, database.Reader().QueryRow(
+		"SELECT count(*) FROM subagent_parent_repair_queue",
+	).Scan(&queued))
+	assert.Zero(t, queued)
+}
+
 func TestShouldSkipByPathWithRewriter(t *testing.T) {
 	database := openTestDB(t)
 
