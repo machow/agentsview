@@ -60,6 +60,28 @@ func validateProviderRootPath(captureDir, providerRoot string) error {
 	return nil
 }
 
+func validateResultOutsideProviderRoot(providerRoot, resultPath string) error {
+	if resultPath == "-" {
+		return nil
+	}
+	resolvedRoot, err := resolveProspectivePath(providerRoot)
+	if err != nil {
+		return fmt.Errorf("resolving provider root: %w", err)
+	}
+	resolvedResult, err := resolveProspectivePath(resultPath)
+	if err != nil {
+		return fmt.Errorf("resolving result path: %w", err)
+	}
+	inside, err := pathWithin(resolvedRoot, resolvedResult)
+	if err != nil {
+		return err
+	}
+	if inside {
+		return errors.New("result path must be outside the provider root")
+	}
+	return nil
+}
+
 func writeCaptureResult(
 	state *captureState,
 	resultPath string,

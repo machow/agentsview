@@ -83,3 +83,47 @@ func TestWriteSessionBatchContextStopsDuringUsagePreparation(t *testing.T) {
 	require.NoError(t, readErr)
 	assert.Nil(t, session)
 }
+
+func TestWriteSessionBatchKeepsMessageAggregatePrecedenceAfterSanitization(
+	t *testing.T,
+) {
+	database := testDB(t)
+	const sessionID = "aggregate-precedence"
+	overLimit := MaxPlausibleTokens + 1
+	message := asstMsg(sessionID, 0, "answer")
+	message.OutputTokens = overLimit
+	message.HasOutputTokens = true
+	message.ContextTokens = overLimit
+	message.HasContextTokens = true
+
+	result, err := database.WriteSessionBatchContext(
+		t.Context(), []SessionBatchWrite{{
+			Session: Session{
+				ID: sessionID, Project: "project-a",
+				Machine: defaultMachine, Agent: defaultAgent,
+				TotalOutputTokens: overLimit, HasTotalOutputTokens: true,
+				PeakContextTokens: overLimit, HasPeakContextTokens: true,
+			},
+			Messages: []Message{message},
+			UsageEvents: []UsageEvent{
+				{SessionID: sessionID, Source: "message",
+					InputTokens:          MaxPlausibleTokens,
+					CacheReadInputTokens: 1,
+					OutputTokens:         1_000_000},
+				{SessionID: sessionID, Source: "message",
+					OutputTokens: 1_000_001},
+			},
+			DataVersion: CurrentDataVersion(),
+		}},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.WrittenSessions)
+
+	stored, err := database.GetSessionFull(t.Context(), sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, MaxPlausibleTokens, stored.TotalOutputTokens)
+	assert.True(t, stored.HasTotalOutputTokens)
+	assert.Equal(t, MaxPlausibleTokens, stored.PeakContextTokens)
+	assert.True(t, stored.HasPeakContextTokens)
+}

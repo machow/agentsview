@@ -632,6 +632,35 @@ func TestCaptureRejectsResultPathsInsideCaptureState(t *testing.T) {
 	}
 }
 
+func TestRunRejectsResultPathInsideProviderRootBeforeStarting(t *testing.T) {
+	root := t.TempDir()
+	captureDir := filepath.Join(t.TempDir(), "capture")
+	workDir := t.TempDir()
+	physicalWorkDir, err := filepath.EvalSymlinks(workDir)
+	require.NoError(t, err)
+	sessionID := "11111111-2222-4333-8444-555555555555"
+	resultPath := filepath.Join(
+		root, encodeClaudeWorkDir(physicalWorkDir), sessionID+".jsonl")
+	producer := copyCaptureHelper(t, "claude")
+	var stdout bytes.Buffer
+
+	_, err = Run(context.Background(), RunOptions{
+		Provider: ProviderClaude, OccurrenceID: "provider-result-collision",
+		ProviderSessionID: sessionID,
+		CaptureDir:        captureDir, ResultPath: resultPath,
+		ProviderRoot: root, WorkDir: workDir,
+		Command:     []string{producer, "-p", "prompt"},
+		Environment: helperEnvironment(root, "claude-final", 0),
+		Streams:     Streams{Stdout: &stdout, Stderr: io.Discard},
+		Limits:      testLimits(), CustomPricing: testPricing(),
+	})
+
+	require.ErrorContains(t, err, "result path must be outside the provider root")
+	assert.NoDirExists(t, captureDir)
+	assert.NoFileExists(t, resultPath)
+	assert.Empty(t, stdout.String())
+}
+
 func TestRunRejectsResultDirectoryBeforeCreatingState(t *testing.T) {
 	root := t.TempDir()
 	captureDir := filepath.Join(t.TempDir(), "capture")
@@ -1065,6 +1094,43 @@ func TestRunClaudeQuiescentUnfinishedSessionSealsPartialUsage(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, data, replay.Bytes())
+}
+
+func TestRunClaudeMalformedMiddleRecordSealsPartialUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode string
+	}{
+		{name: "root", mode: "claude-malformed"},
+		{name: "descendant", mode: "claude-subagent-malformed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			resultPath := filepath.Join(t.TempDir(), "result.json")
+			producer := copyCaptureHelper(t, "claude")
+			_, err := Run(context.Background(), RunOptions{
+				Provider: ProviderClaude, OccurrenceID: "malformed-" + tc.name,
+				CaptureDir: filepath.Join(t.TempDir(), "capture"),
+				ResultPath: resultPath, ProviderRoot: root, WorkDir: t.TempDir(),
+				Command:     []string{producer, "-p", "prompt"},
+				Environment: helperEnvironment(root, tc.mode, 0),
+				Streams:     Streams{Stdout: io.Discard, Stderr: io.Discard},
+				Limits:      testLimits(), CustomPricing: testPricing(),
+			})
+			require.NoError(t, err)
+
+			data, err := os.ReadFile(resultPath)
+			require.NoError(t, err)
+			result, err := DecodeResult(bytes.NewReader(data))
+			require.NoError(t, err)
+			assert.Equal(t, ReportingComplete, result.Reporting.Outcome)
+			assert.Equal(t, AssurancePartial, result.Assurance.State)
+			assert.Contains(t, result.Assurance.Reasons, ReasonMalformedTranscript)
+			require.NotNil(t, result.Usage)
+			require.NotNil(t, result.Usage.OutputTokens)
+			assert.Positive(t, *result.Usage.OutputTokens)
+		})
+	}
 }
 
 func TestRunCodexRequiresJSONAndUsesExactThreadMarker(t *testing.T) {
@@ -1863,10 +1929,19 @@ func captureTestHelper() {
 		path := filepath.Join(root, encodeClaudeWorkDir(cwd), sessionID+".jsonl")
 		_ = os.MkdirAll(filepath.Dir(path), 0o700)
 		lines := claudeHelperLines(sessionID, cwd, mode == "claude-unfinished")
-		if mode == "claude-subagent" || mode == "claude-missing-subagent" ||
+		if mode == "claude-malformed" {
+			lines = []string{lines[0], `{"type":"assistant"`, lines[1]}
+		}
+		if mode == "claude-subagent" || mode == "claude-subagent-malformed" ||
+			mode == "claude-missing-subagent" ||
 			mode == "claude-unlinked-subagent" {
 			var childLines []string
 			lines, childLines = claudeSubagentHelperLines(sessionID, cwd)
+			if mode == "claude-subagent-malformed" {
+				childLines = []string{
+					childLines[0], `{"type":"assistant"`, childLines[1],
+				}
+			}
 			if mode == "claude-unlinked-subagent" {
 				lines = append(lines[:2], lines[3:]...)
 			}

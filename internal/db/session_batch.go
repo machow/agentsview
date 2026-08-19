@@ -309,17 +309,19 @@ func sanitizeSessionBatchWriteContext(
 			write.Session.HasPeakContextTokens = hasPeak
 		}
 	}
-	if totalFromEvts || peakFromEvts {
+	eventTotalNeeded := totalFromEvts && !totalFromMsgs
+	eventPeakNeeded := peakFromEvts && !peakFromMsgs
+	if eventTotalNeeded || eventPeakNeeded {
 		total, hasTotal, peak, hasPeak, err :=
 			batchUsageEventTokenTotalsContext(ctx, write.UsageEvents)
 		if err != nil {
 			return SessionBatchWrite{}, err
 		}
-		if totalFromEvts {
+		if eventTotalNeeded {
 			write.Session.TotalOutputTokens = total
 			write.Session.HasTotalOutputTokens = hasTotal
 		}
-		if peakFromEvts {
+		if eventPeakNeeded {
 			write.Session.PeakContextTokens = peak
 			write.Session.HasPeakContextTokens = hasPeak
 		}

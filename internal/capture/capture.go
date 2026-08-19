@@ -136,6 +136,9 @@ func prepareRun(opts RunOptions) (preparedRun, error) {
 	if err := validateProviderRootPath(opts.CaptureDir, root); err != nil {
 		return preparedRun{}, err
 	}
+	if err := validateResultOutsideProviderRoot(root, resultPath); err != nil {
+		return preparedRun{}, err
+	}
 	if opts.Provider == ProviderClaude {
 		if err := rejectExistingClaudeSources(root, invocation.sessionID, limits); err != nil {
 			return preparedRun{}, err
@@ -324,6 +327,11 @@ func Report(ctx context.Context, opts ReportOptions) (ReportingOutcome, error) {
 		return ReportingOutcome{}, err
 	}
 	defer state.close()
+	if err := validateResultOutsideProviderRoot(
+		state.manifest.ProviderRoot, resultPath,
+	); err != nil {
+		return ReportingOutcome{}, err
+	}
 	if state.manifest.SealedDigest != "" {
 		data, err := state.readSealed()
 		if err != nil {
@@ -851,6 +859,18 @@ func sessionFinal(session *db.Session) bool {
 	return status == parser.TerminationAwaitingUser || status == parser.TerminationClean
 }
 
+func sessionsHaveMalformedLines(root *db.Session, descendants []db.Session) bool {
+	if root != nil && root.ParserMalformedLines > 0 {
+		return true
+	}
+	for i := range descendants {
+		if descendants[i].ParserMalformedLines > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func resultFromIngest(m manifest, ingested *ingestedCapture, agentsViewVersion string) Result {
 	result := baseResult(m, agentsViewVersion)
 	result.Reporting.Outcome = ReportingComplete
@@ -859,6 +879,11 @@ func resultFromIngest(m manifest, ingested *ingestedCapture, agentsViewVersion s
 		result.Assurance.State = AssurancePartial
 		result.Assurance.Reasons = append(
 			result.Assurance.Reasons, ReasonUnfinishedSession)
+	}
+	if sessionsHaveMalformedLines(ingested.Root, ingested.Descendants) {
+		result.Assurance.State = AssurancePartial
+		result.Assurance.Reasons = append(
+			result.Assurance.Reasons, ReasonMalformedTranscript)
 	}
 	result.Provider.SessionID = m.ProviderSessionID
 	result.Provider.IncludedSessionIDs = []string{m.ProviderSessionID}

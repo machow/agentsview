@@ -346,9 +346,10 @@ Preflight errors happen before the wrapper starts and therefore do not create a
 result. These include a missing or oversized occurrence ID, an unsupported
 provider invocation or continuation mode, an invalid or previously used
 explicit UUID, a result path inside capture state, and any pre-existing capture
-directory. The provider root also cannot be the capture directory or a child of
-it. Correct a malformed invocation. For an existing occurrence, use `capture
-report`; never delete its state merely to turn a retry into a second occurrence.
+directory. The result path must also be outside the provider root. The provider
+root cannot be the capture directory or a child of it. Correct a malformed
+invocation. For an existing occurrence, use `capture report`; never delete its
+state merely to turn a retry into a second occurrence.
 Recovery requires a current-user-owned directory with a valid manifest and only
 capture-owned top-level entries before AgentsView changes or cleans state.
 
@@ -371,7 +372,8 @@ bundle without revealing its provider-relative path.
 `assurance.state` is `complete` when every category AgentsView promises for the
 adapter is proven, `partial` when useful facts are present with a named gap, and
 `unavailable` when usage cannot be proven. Assurance reasons include
-`unfinished_session`, `cost_unavailable`, `usage_unavailable`,
+`unfinished_session`, `malformed_transcript`, `cost_unavailable`,
+`usage_unavailable`,
 `codex_cache_write_unavailable`, `reasoning_output_unavailable`,
 `unpriced_model`, and `metadata_truncated`. These are not reporting failures:
 consumers may use the proven fields while preserving the stated limitation.
@@ -380,6 +382,8 @@ A quiescent transcript can be `unfinished_session` after the producer exits,
 for example when CI interrupts a pending tool call. AgentsView seals the usage
 it can prove instead of waiting for a dead writer. `cost_unavailable` means no
 authoritative complete cost exists; omitted cost is never silently treated as
-zero. When stored output includes messages not represented by canonical usage
+zero. `malformed_transcript` means at least one source line could not be parsed,
+so the visible usage may undercount the producer's total. When stored output
+includes messages not represented by canonical usage
 rows, AgentsView reports that output but omits input and cache fields and adds
 `usage_unavailable` so categories with different provenance are not mixed.

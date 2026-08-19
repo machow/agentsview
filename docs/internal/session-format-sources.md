@@ -224,7 +224,9 @@ Grok section and remove the explicit registry exception in the coverage test.
   child reference to have a captured transcript, and includes every captured
   subagent file even when interruption prevented its link record from being
   flushed. Parser termination remains separate assurance; an interrupted
-  transcript can still contain usable token records.
+  transcript can still contain usable token records. Because an unparseable
+  middle record may hide usage, one-shot capture marks assurance partial when
+  any included session reports parser-malformed lines.
 
 ## OpenClaude (`openclaude`)
 

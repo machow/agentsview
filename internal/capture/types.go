@@ -92,6 +92,7 @@ const (
 	ReasonNoSession              ReasonCode = "no_session"
 	ReasonMultipleSessions       ReasonCode = "multiple_sessions"
 	ReasonUnfinishedSession      ReasonCode = "unfinished_session"
+	ReasonMalformedTranscript    ReasonCode = "malformed_transcript"
 	ReasonFinalizationTimeout    ReasonCode = "finalization_timeout"
 	ReasonChildStartFailed       ReasonCode = "child_start_failed"
 	ReasonCorrelationUnavailable ReasonCode = "correlation_unavailable"
@@ -216,6 +217,7 @@ func DecodeResult(r io.Reader) (Result, error) {
 func knownReason(reason ReasonCode) bool {
 	switch reason {
 	case ReasonNoSession, ReasonMultipleSessions, ReasonUnfinishedSession,
+		ReasonMalformedTranscript,
 		ReasonFinalizationTimeout, ReasonChildStartFailed,
 		ReasonCorrelationUnavailable, ReasonCorrelationConflict,
 		ReasonSourceLimit, ReasonSourceBytesLimit, ReasonSourceUnavailable,
