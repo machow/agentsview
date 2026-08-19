@@ -182,7 +182,8 @@ func Run(ctx context.Context, opts RunOptions) (RunOutcome, error) {
 	}
 	defer state.close()
 	if err := invalidateResult(prepared.resultPath); err != nil {
-		return RunOutcome{}, err
+		rollbackErr := state.discardNewState()
+		return RunOutcome{}, errors.Join(err, rollbackErr)
 	}
 
 	streams := defaultStreams(opts.Streams)

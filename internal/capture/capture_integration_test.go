@@ -632,6 +632,36 @@ func TestCaptureRejectsResultPathsInsideCaptureState(t *testing.T) {
 	}
 }
 
+func TestRunRejectsResultDirectoryBeforeCreatingState(t *testing.T) {
+	root := t.TempDir()
+	captureDir := filepath.Join(t.TempDir(), "capture")
+	resultPath := filepath.Join(t.TempDir(), "usage.json")
+	require.NoError(t, os.Mkdir(resultPath, 0o700))
+	producer := copyCaptureHelper(t, "claude")
+	var stdout bytes.Buffer
+	opts := RunOptions{
+		Provider: ProviderClaude, OccurrenceID: "invalid-result-target",
+		CaptureDir: captureDir, ResultPath: resultPath,
+		ProviderRoot: root, WorkDir: t.TempDir(),
+		Command:     []string{producer, "-p", "prompt"},
+		Environment: helperEnvironment(root, "claude-final", 0),
+		Streams:     Streams{Stdout: &stdout, Stderr: io.Discard},
+		Limits:      testLimits(), CustomPricing: testPricing(),
+	}
+
+	_, err := Run(context.Background(), opts)
+
+	require.ErrorContains(t, err, "not a regular file")
+	assert.DirExists(t, resultPath)
+	assert.NoDirExists(t, captureDir)
+	assert.Empty(t, stdout.String(), "the producer must not start")
+
+	opts.ResultPath = filepath.Join(t.TempDir(), "usage.json")
+	_, err = Run(context.Background(), opts)
+	require.NoError(t, err)
+	assert.FileExists(t, opts.ResultPath)
+}
+
 func TestRunRejectsProviderRootInsideCaptureState(t *testing.T) {
 	captureDir := filepath.Join(t.TempDir(), "capture")
 	producer := copyCaptureHelper(t, "claude")

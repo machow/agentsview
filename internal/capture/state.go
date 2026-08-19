@@ -94,6 +94,7 @@ type manifest struct {
 type captureState struct {
 	dir                  string
 	lock                 *flock.Flock
+	createdInfo          os.FileInfo
 	manifest             manifest
 	finalizationDeadline time.Time
 }
@@ -150,7 +151,10 @@ func createState(dir string, m manifest) (*captureState, error) {
 	if len(entries) != 0 {
 		return nil, errors.New("new capture directory is not empty")
 	}
-	state := &captureState{dir: absDir, lock: flock.New(filepath.Join(absDir, lockFileName))}
+	state := &captureState{
+		dir: absDir, lock: flock.New(filepath.Join(absDir, lockFileName)),
+		createdInfo: createdInfo,
+	}
 	locked, err := state.lock.TryLock()
 	if err != nil {
 		return nil, fmt.Errorf("locking capture: %w", err)
@@ -387,6 +391,34 @@ func removeIncompleteNewState(
 	}
 	_ = os.Remove(filepath.Join(dir, manifestFileName))
 	_ = os.Remove(dir)
+}
+
+func (s *captureState) discardNewState() error {
+	if s.createdInfo == nil {
+		return errors.New("capture state is not newly created")
+	}
+	currentInfo, err := os.Lstat(s.dir)
+	if err != nil {
+		return fmt.Errorf("checking new capture directory: %w", err)
+	}
+	if !os.SameFile(s.createdInfo, currentInfo) {
+		return errors.New("new capture directory changed before rollback")
+	}
+	if s.lock != nil {
+		if err := s.lock.Unlock(); err != nil {
+			return fmt.Errorf("unlocking new capture state: %w", err)
+		}
+		s.lock = nil
+	}
+	for _, path := range []string{s.manifestPath(), filepath.Join(s.dir, lockFileName)} {
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("removing new capture state: %w", err)
+		}
+	}
+	if err := os.Remove(s.dir); err != nil {
+		return fmt.Errorf("removing new capture directory: %w", err)
+	}
+	return nil
 }
 
 func (s *captureState) close() {

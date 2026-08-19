@@ -20,6 +20,9 @@ func validateResultPath(captureDir, resultPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolving result path: %w", err)
 	}
+	if err := validateExistingResult(resultPath); err != nil {
+		return "", err
+	}
 	resolvedCapture, err := resolveProspectivePath(captureDir)
 	if err != nil {
 		return "", fmt.Errorf("resolving capture directory: %w", err)
@@ -71,6 +74,22 @@ func writeCaptureResult(
 }
 
 func invalidateResult(path string) error {
+	if err := validateExistingResult(path); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("rechecking existing result: %w", err)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("invalidating existing result: %w", err)
+	}
+	return nil
+}
+
+func validateExistingResult(path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -78,11 +97,8 @@ func invalidateResult(path string) error {
 	if err != nil {
 		return fmt.Errorf("checking existing result: %w", err)
 	}
-	if info.IsDir() {
-		return errors.New("result path is a directory")
-	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("invalidating existing result: %w", err)
+	if !info.Mode().IsRegular() {
+		return errors.New("existing result path is not a regular file")
 	}
 	return nil
 }
