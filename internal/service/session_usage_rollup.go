@@ -129,6 +129,9 @@ func delegatedDescendantsFrom(
 	queue := []walkState{{id: rootID, delegated: rootDelegated}}
 	var out []db.Session
 	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		parent := queue[0]
 		queue = queue[1:]
 		children, err := store.GetChildSessions(ctx, parent.id)
@@ -136,6 +139,9 @@ func delegatedDescendantsFrom(
 			return nil, err
 		}
 		for _, child := range children {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if child.ID == rootID {
 				continue
 			}

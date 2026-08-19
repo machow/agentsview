@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 )
 
 func configureChildProcess(*exec.Cmd) {}
@@ -24,12 +25,20 @@ func forwardSignals(
 	process *os.Process, ch chan os.Signal,
 ) func() (string, int) {
 	done := make(chan struct{})
-	go relayWindowsSignals(ch, done, func(sig os.Signal) {
-		_ = process.Signal(sig)
+	var wg sync.WaitGroup
+	var first os.Signal
+	wg.Go(func() {
+		first = relayWindowsSignals(ch, done, func(sig os.Signal) {
+			_ = process.Signal(sig)
+		})
 	})
 	return func() (string, int) {
 		unregisterChildSignals(ch)
 		close(done)
+		wg.Wait()
+		if first == os.Interrupt {
+			return "SIGINT", 130
+		}
 		return "", 0
 	}
 }
@@ -38,13 +47,27 @@ func relayWindowsSignals(
 	signals <-chan os.Signal,
 	done <-chan struct{},
 	forward func(os.Signal),
-) {
+) os.Signal {
+	var first os.Signal
+	handle := func(sig os.Signal) {
+		if first == nil {
+			first = sig
+		}
+		forward(sig)
+	}
 	for {
 		select {
 		case sig := <-signals:
-			forward(sig)
+			handle(sig)
 		case <-done:
-			return
+			for {
+				select {
+				case sig := <-signals:
+					handle(sig)
+				default:
+					return first
+				}
+			}
 		}
 	}
 }

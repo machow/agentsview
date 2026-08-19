@@ -14,6 +14,37 @@ import (
 	"go.kenn.io/agentsview/internal/service"
 )
 
+type aggregationCancelContext struct {
+	context.Context
+	armed     bool
+	remaining int
+}
+
+func (c *aggregationCancelContext) Err() error {
+	if !c.armed {
+		return nil
+	}
+	if c.remaining == 0 {
+		return context.Canceled
+	}
+	c.remaining--
+	return nil
+}
+
+type cancelAfterRowsStore struct {
+	*rollupStore
+	cancelContext *aggregationCancelContext
+}
+
+func (s *cancelAfterRowsStore) GetSessionUsageRows(
+	ctx context.Context, ids []string,
+) (*activity.SessionUsageRows, error) {
+	rows, err := s.rollupStore.GetSessionUsageRows(ctx, ids)
+	s.cancelContext.armed = true
+	s.cancelContext.remaining = 100
+	return rows, err
+}
+
 // usageRow builds one row of the kind a store's GetSessionUsageRows returns:
 // already deduplicated across the whole id set and ordered by timestamp.
 func usageRow(
@@ -106,6 +137,55 @@ func TestSessionUsageWithSubagentsCombinesCostAcrossDescendants(t *testing.T) {
 	assert.Equal(t, money.MustParseDollars("2"), got.Breakdown[1].Cost)
 	assert.Equal(t, 20, got.Breakdown[1].InputTokens)
 	assert.Equal(t, 10, got.Breakdown[1].OutputTokens)
+}
+
+func TestSessionUsageWithSubagentsStopsAggregationAfterRowsLoad(t *testing.T) {
+	rows := make([]activity.UsageRow, 2_000)
+	for i := range rows {
+		rows[i] = activity.UsageRow{
+			SessionID: "child", Model: "model", Contributes: true,
+			OutputTokens: 1, Priced: true,
+		}
+	}
+	ctx := &aggregationCancelContext{Context: context.Background()}
+	store := &cancelAfterRowsStore{
+		cancelContext: ctx,
+		rollupStore: &rollupStore{
+			usages: map[string]*db.SessionUsage{
+				"root": {SessionID: "root", HasTokenData: true},
+			},
+			children: map[string][]db.Session{
+				"root": {{ID: "child", RelationshipType: "subagent"}},
+			},
+			rows: rows,
+		},
+	}
+
+	got, err := service.SessionUsageWithSubagents(ctx, store, "root", true)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, got)
+}
+
+func TestSessionUsageTokenTotalsStopsDuringProjection(t *testing.T) {
+	breakdown := make([]db.SessionUsageBreakdownEntry, 2_000)
+	for i := range breakdown {
+		breakdown[i] = db.SessionUsageBreakdownEntry{
+			InputTokens: 1, OutputTokens: 1,
+		}
+	}
+	ctx := &aggregationCancelContext{
+		Context: context.Background(), armed: true, remaining: 100,
+	}
+
+	totals, complete, err := service.SessionUsageTokenTotals(ctx, &db.SessionUsage{
+		HasTokenData: true, TotalOutputTokens: len(breakdown),
+		BreakdownCount: len(breakdown), Breakdown: breakdown,
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, complete)
+	assert.Equal(t, db.UsageTotals{}, totals)
 }
 
 // TestSessionUsageWithSubagentsCountsRowlessSessionsFromAggregates covers the

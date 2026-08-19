@@ -809,7 +809,13 @@ func finishIngestedResult(
 	if err := ctx.Err(); err != nil {
 		return captureFailure(state, err, agentsViewVersion)
 	}
-	return resultFromIngest(state.manifest, ingested, agentsViewVersion), nil
+	result, err := resultFromIngest(
+		ctx, state.manifest, ingested, agentsViewVersion,
+	)
+	if err != nil {
+		return captureFailure(state, err, agentsViewVersion)
+	}
+	return result, nil
 }
 
 func captureFailure(
@@ -871,7 +877,12 @@ func sessionsHaveMalformedLines(root *db.Session, descendants []db.Session) bool
 	return false
 }
 
-func resultFromIngest(m manifest, ingested *ingestedCapture, agentsViewVersion string) Result {
+func resultFromIngest(
+	ctx context.Context,
+	m manifest,
+	ingested *ingestedCapture,
+	agentsViewVersion string,
+) (Result, error) {
 	result := baseResult(m, agentsViewVersion)
 	result.Reporting.Outcome = ReportingComplete
 	result.Assurance.State = AssuranceComplete
@@ -922,20 +933,36 @@ func resultFromIngest(m manifest, ingested *ingestedCapture, agentsViewVersion s
 		}
 		result.Models[i] = boundedModel
 	}
-	if ingested.Usage.HasTokenData {
-		totals, complete := service.SessionUsageTokenTotals(ingested.Usage)
+	if err := applyUsageResult(ctx, m.Provider, ingested.Usage, &result); err != nil {
+		return Result{}, err
+	}
+	slices.Sort(result.Assurance.Reasons)
+	result.Assurance.Reasons = compactReasons(result.Assurance.Reasons)
+	return result, nil
+}
+
+func applyUsageResult(
+	ctx context.Context, provider string, usageData *db.SessionUsage, result *Result,
+) error {
+	if usageData.HasTokenData {
+		totals, complete, err := service.SessionUsageTokenTotals(
+			ctx, usageData,
+		)
+		if err != nil {
+			return err
+		}
 		usage := &TokenUsage{OutputTokens: &totals.OutputTokens}
 		if complete {
 			usage.InputTokens = &totals.InputTokens
 			usage.CacheReadInputTokens = &totals.CacheReadTokens
-			if Provider(m.Provider) == ProviderClaude {
+			if Provider(provider) == ProviderClaude {
 				usage.CacheCreationInputTokens = &totals.CacheCreationTokens
 			}
 		} else {
 			result.Assurance.State = AssurancePartial
 			result.Assurance.Reasons = append(result.Assurance.Reasons, ReasonUsageUnavailable)
 		}
-		if Provider(m.Provider) == ProviderCodex {
+		if Provider(provider) == ProviderCodex {
 			result.Assurance.State = AssurancePartial
 			result.Assurance.Reasons = append(
 				result.Assurance.Reasons,
@@ -947,9 +974,9 @@ func resultFromIngest(m manifest, ingested *ingestedCapture, agentsViewVersion s
 		result.Assurance.State = AssuranceUnavailable
 		result.Assurance.Reasons = append(result.Assurance.Reasons, ReasonUsageUnavailable)
 	}
-	if ingested.Usage.HasCost {
+	if usageData.HasCost {
 		result.Cost = &Cost{
-			Amount: ingested.Usage.Cost, Currency: "USD", Source: ingested.Usage.CostSource,
+			Amount: usageData.Cost, Currency: "USD", Source: usageData.CostSource,
 		}
 	} else if result.Usage != nil {
 		if result.Assurance.State == AssuranceComplete {
@@ -957,14 +984,12 @@ func resultFromIngest(m manifest, ingested *ingestedCapture, agentsViewVersion s
 		}
 		result.Assurance.Reasons = append(
 			result.Assurance.Reasons, ReasonCostUnavailable)
-		if len(ingested.Usage.UnpricedModels) > 0 {
+		if len(usageData.UnpricedModels) > 0 {
 			result.Assurance.Reasons = append(
 				result.Assurance.Reasons, ReasonUnpricedModel)
 		}
 	}
-	slices.Sort(result.Assurance.Reasons)
-	result.Assurance.Reasons = compactReasons(result.Assurance.Reasons)
-	return result
+	return nil
 }
 
 func compactReasons(reasons []ReasonCode) []ReasonCode {

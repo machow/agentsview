@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -55,7 +56,7 @@ func TestClaudeWorkDirEncodingMatchesObservedProducerLayout(t *testing.T) {
 
 func TestResultMarksIncompleteTokenAndCostProvenance(t *testing.T) {
 	termination := string(parser.TerminationClean)
-	result := resultFromIngest(manifest{
+	result, err := resultFromIngest(context.Background(), manifest{
 		OccurrenceID: "partial-provenance", Provider: string(ProviderClaude),
 		ProviderSessionID: "11111111-1111-4111-8111-111111111111",
 	}, &ingestedCapture{
@@ -70,6 +71,7 @@ func TestResultMarksIncompleteTokenAndCostProvenance(t *testing.T) {
 			}},
 		},
 	}, "test")
+	require.NoError(t, err)
 
 	require.NotNil(t, result.Usage)
 	assertIntPointer(t, result.Usage.OutputTokens, 70)

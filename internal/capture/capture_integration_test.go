@@ -2234,7 +2234,10 @@ func assertBundleImportsUsage(
 		t.Context(), database, rootID, true)
 	require.NoError(t, err)
 	require.NotNil(t, imported)
-	importedTotals, complete := service.SessionUsageTokenTotals(imported)
+	importedTotals, complete, err := service.SessionUsageTokenTotals(
+		t.Context(), imported,
+	)
+	require.NoError(t, err)
 	require.True(t, complete)
 	require.NotNil(t, sealed.Usage)
 	assertIntPointer(t, sealed.Usage.InputTokens, importedTotals.InputTokens)

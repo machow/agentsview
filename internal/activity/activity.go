@@ -120,6 +120,21 @@ type UsageCostAllocation struct {
 // session total; when it does, that settlement replaces the session's row
 // estimates and is distributed by their catalog-cost weights.
 func AllocateUsageCosts(usage []UsageRow) []UsageCostAllocation {
+	allocated, err := AllocateUsageCostsContext(context.Background(), usage)
+	if err != nil {
+		panic(err)
+	}
+	return allocated
+}
+
+// AllocateUsageCostsContext is AllocateUsageCosts with cancellation for
+// bounded in-memory aggregation paths.
+func AllocateUsageCostsContext(
+	ctx context.Context, usage []UsageRow,
+) ([]UsageCostAllocation, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	type sessionCost struct {
 		carrier int
 		cost    money.Money
@@ -128,6 +143,9 @@ func AllocateUsageCosts(usage []UsageRow) []UsageCostAllocation {
 	allocated := make([]UsageCostAllocation, len(usage))
 	sessionCosts := make(map[string]*sessionCost)
 	for i, row := range usage {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		allocated[i] = UsageCostAllocation{
 			Cost: row.Cost, CostSource: row.CostSource,
 			Priced: row.Priced, Contributes: row.Contributes,
@@ -140,6 +158,9 @@ func AllocateUsageCosts(usage []UsageRow) []UsageCostAllocation {
 		}
 	}
 	for i, row := range usage {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		selected := sessionCosts[row.SessionID]
 		if selected == nil || !allocated[i].Contributes {
 			continue
@@ -147,6 +168,9 @@ func AllocateUsageCosts(usage []UsageRow) []UsageCostAllocation {
 		selected.indices = append(selected.indices, i)
 	}
 	for _, selected := range sessionCosts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(selected.indices) == 0 {
 			allocated[selected.carrier] = UsageCostAllocation{
 				Cost: selected.cost, CostSource: export.CostSourceReported,
@@ -156,17 +180,28 @@ func AllocateUsageCosts(usage []UsageRow) []UsageCostAllocation {
 		}
 		weights := make([]money.Money, len(selected.indices))
 		for i, index := range selected.indices {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			weights[i] = usage[index].Cost
 		}
-		costs := export.AllocateCostByWeight(selected.cost, weights)
+		costs, err := export.AllocateCostByWeightContext(
+			ctx, selected.cost, weights,
+		)
+		if err != nil {
+			return nil, err
+		}
 		for i, index := range selected.indices {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			allocated[index] = UsageCostAllocation{
 				Cost: costs[i], CostSource: export.CostSourceReported,
 				Priced: true, Contributes: true,
 			}
 		}
 	}
-	return allocated
+	return allocated, nil
 }
 
 // Report is the API payload.

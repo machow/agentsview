@@ -4,6 +4,7 @@ package capture
 
 import (
 	"os"
+	"os/exec"
 	"os/signal"
 	"testing"
 	"time"
@@ -42,10 +43,11 @@ func TestRelayWindowsSignalsForwardsRepeatedInterrupts(t *testing.T) {
 	done := make(chan struct{})
 	forwarded := make(chan os.Signal, 2)
 	exited := make(chan struct{})
+	received := make(chan os.Signal, 1)
 	signals <- os.Interrupt
 	signals <- os.Interrupt
 	go func() {
-		relayWindowsSignals(signals, done, func(sig os.Signal) {
+		received <- relayWindowsSignals(signals, done, func(sig os.Signal) {
 			forwarded <- sig
 		})
 		close(exited)
@@ -65,4 +67,23 @@ func TestRelayWindowsSignalsForwardsRepeatedInterrupts(t *testing.T) {
 	case <-time.After(time.Second):
 		require.FailNow(t, "signal relay did not stop")
 	}
+	assert.Equal(t, os.Interrupt, <-received)
+}
+
+func TestForwardSignalsRecordsInterruptAfterSuccessfulChild(t *testing.T) {
+	if os.Getenv("AGENTSVIEW_CAPTURE_WINDOWS_EXIT_ZERO") == "1" {
+		os.Exit(0)
+	}
+	cmd := exec.Command(os.Args[0],
+		"-test.run=^TestForwardSignalsRecordsInterruptAfterSuccessfulChild$")
+	cmd.Env = append(os.Environ(), "AGENTSVIEW_CAPTURE_WINDOWS_EXIT_ZERO=1")
+	require.NoError(t, cmd.Start())
+	signals := make(chan os.Signal, 2)
+	stopForwarding := forwardSignals(cmd.Process, signals)
+	signals <- os.Interrupt
+	require.NoError(t, cmd.Wait())
+
+	signalName, exitCode := stopForwarding()
+	assert.Equal(t, "SIGINT", signalName)
+	assert.Equal(t, 130, exitCode)
 }
