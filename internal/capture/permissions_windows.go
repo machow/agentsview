@@ -115,11 +115,13 @@ func verifyWindowsParentSecurity(
 		if err := windows.GetAce(dacl, index, &ace); err != nil {
 			return err
 		}
+		// The capture directory is created atomically with a protected DACL,
+		// so inheritable create/write permissions never apply to it. Validate
+		// only rights that can replace an existing ancestor. Every descendant
+		// parent is inspected separately with its effective DACL.
 		directReplacement := ace.Header.AceFlags&windows.INHERIT_ONLY_ACE == 0 &&
 			ace.Mask&captureParentReplacementRights() != 0
-		inheritedWrite := ace.Header.AceFlags&windows.CONTAINER_INHERIT_ACE != 0 &&
-			ace.Mask&captureInheritedWriteRights() != 0
-		if (!directReplacement && !inheritedWrite) ||
+		if !directReplacement ||
 			ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
 			continue
 		}
@@ -138,17 +140,6 @@ func captureParentReplacementRights() windows.ACCESS_MASK {
 	const fileDeleteChild windows.ACCESS_MASK = 0x40
 	return windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER |
 		windows.GENERIC_ALL | fileDeleteChild
-}
-
-func captureInheritedWriteRights() windows.ACCESS_MASK {
-	const (
-		fileAddFile         windows.ACCESS_MASK = 0x2
-		fileAddSubdirectory windows.ACCESS_MASK = 0x4
-		fileDeleteChild     windows.ACCESS_MASK = 0x40
-	)
-	return windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER |
-		windows.GENERIC_WRITE | windows.GENERIC_ALL | fileAddFile |
-		fileAddSubdirectory | fileDeleteChild
 }
 
 func captureSIDAllowed(sid *windows.SID, allowed []*windows.SID) bool {

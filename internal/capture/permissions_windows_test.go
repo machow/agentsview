@@ -80,7 +80,7 @@ func TestWindowsParentSecurityAllowsTrustedInstallerOwner(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestWindowsParentSecurityRejectsUntrustedInheritedWrites(t *testing.T) {
+func TestWindowsParentSecurityAllowsInheritOnlyWrites(t *testing.T) {
 	allowed, err := captureDirectorySIDs()
 	require.NoError(t, err)
 	descriptor, err := windows.SecurityDescriptorFromString(
@@ -92,7 +92,7 @@ func TestWindowsParentSecurityRejectsUntrustedInheritedWrites(t *testing.T) {
 
 	err = verifyWindowsParentSecurity(descriptor, allowed)
 
-	require.ErrorContains(t, err, "permits replacement")
+	require.NoError(t, err)
 }
 
 func windowsPermissionManifest(t *testing.T, occurrence string) manifest {
