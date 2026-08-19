@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +73,61 @@ func TestPositAssistantProviderDiscoverAndWatch(t *testing.T) {
 	assert.Equal(t, "sales-dashboard", byPath[mainPath].ProjectHint)
 	assert.Equal(t, "sales-dashboard", byPath[subPath].ProjectHint)
 	assert.Equal(t, "unknown", byPath[defaultPath].ProjectHint)
+}
+
+func TestPositAssistantDefaultDirs(t *testing.T) {
+	def, ok := AgentByType(AgentPositAssistant)
+	require.True(t, ok)
+	assert.Equal(t, []string{
+		".posit/assistant/workspaces",
+		".posit/assistant/tui/workspaces",
+	}, def.DefaultDirs)
+}
+
+// The pa CLI writes the same conversation layout under a sibling
+// tui/workspaces root; discovery must surface sources from both roots.
+func TestPositAssistantProviderDiscoverTwoRoots(t *testing.T) {
+	root := positAssistantTestRoot(t)
+	tuiRoot := filepath.Join(t.TempDir(), "tui", "workspaces")
+	tuiConvDir := filepath.Join(tuiRoot, "default", "44444444")
+	require.NoError(t, os.MkdirAll(tuiConvDir, 0o755))
+	for _, name := range []string{"conversation.json", "lm-messages.jsonl"} {
+		data, err := os.ReadFile(positAssistantTestConvPath(
+			root, "default", "33333333", name,
+		))
+		require.NoError(t, err)
+		if name == "conversation.json" {
+			data = []byte(strings.ReplaceAll(
+				string(data), "33333333", "44444444",
+			))
+		}
+		require.NoError(t, os.WriteFile(
+			filepath.Join(tuiConvDir, name), data, 0o644,
+		))
+	}
+
+	provider, ok := NewProvider(AgentPositAssistant, ProviderConfig{
+		Roots: []string{root, tuiRoot},
+	})
+	require.True(t, ok)
+
+	plan, err := provider.WatchPlan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, plan.Roots, 2)
+
+	discovered, err := provider.Discover(context.Background())
+	require.NoError(t, err)
+	require.Len(t, discovered, 4)
+
+	tuiConvPath := filepath.Join(tuiConvDir, "conversation.json")
+	found := false
+	for _, source := range discovered {
+		if source.DisplayPath == tuiConvPath {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"expected discovery to include the tui/workspaces conversation")
 }
 
 func TestPositAssistantProviderFindSource(t *testing.T) {

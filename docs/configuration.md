@@ -287,7 +287,7 @@ Omitting the key keeps its default directories.
 | Prime Agent           | `~/.prime/agent/sessions/`                                                       | Flat Pi-family JSONL sessions                                                                                                   |
 | Poolside              | `~/Library/Application Support/poolside/trajectories/` (macOS), `~/.local/state/poolside/trajectories/` (Linux), `%APPDATA%\\poolside\\trajectories\\` (Windows) | NDJSON trajectory files                                                                                                         |
 | Piebald               | `~/.local/share/piebald/`                                                        | SQLite database (`app.db`)                                                                                                      |
-| Posit Assistant       | `~/.posit/assistant/workspaces/`                                                 | Per-conversation `conversation.json` tree plus `lm-messages.jsonl` transcript                                                   |
+| Posit Assistant       | `~/.posit/assistant/workspaces/`, `~/.posit/assistant/tui/workspaces/`           | Per-conversation `conversation.json` tree plus `lm-messages.jsonl` transcript                                                   |
 | Positron Assistant    | (platform-specific, see below)                                                   | JSON / JSONL per session                                                                                                        |
 | QClaw                 | `~/.qclaw/assets/static/agents/`                                                 | JSONL per session                                                                                                               |
 | Qoder                 | Legacy export roots plus platform-specific `SharedClientCache` (see below)       | JSONL project transcripts plus sidecar metadata                                                                                 |
@@ -433,9 +433,11 @@ directory per conversation under
 `~/.posit/assistant/workspaces/<workspaceId>/<conversationId>/`, containing a
 `conversation.json` message tree and an append-only `lm-messages.jsonl`
 transcript; subagent runs nest under a `subagents/` subdirectory of their parent
-conversation. All Posit Assistant hosts (Positron/VS Code extension, standalone,
-desktop, TUI) share this location. Set `POSIT_ASSISTANT_DIR` or
-`posit_assistant_dirs` if your installation stores its workspaces elsewhere.
+conversation. The Positron/VS Code extension writes under
+`~/.posit/assistant/workspaces/`, while the `pa` CLI (TUI and headless modes)
+writes the same layout under `~/.posit/assistant/tui/workspaces/`; both roots
+are scanned by default. Set `POSIT_ASSISTANT_DIR` or `posit_assistant_dirs` if
+your installation stores its workspaces elsewhere.
 
 **Claude Cowork default directories** follow Claude Desktop's Electron user-data
 location:

@@ -1402,7 +1402,12 @@ add an archived or maintained mirror without replacing the original identity.
 ## Posit Assistant (`posit-assistant`)
 
 - **Format:** Workspace conversation directories containing `conversation.json`,
-  `lm-messages.jsonl`, and `ui-messages.jsonl`.
+  `lm-messages.jsonl`, and `ui-messages.jsonl`. Two sibling roots carry the
+  same layout: the Positron/VS Code extension writes
+  `.posit/assistant/workspaces/`, and the `pa` CLI (TUI and headless modes)
+  writes `.posit/assistant/tui/workspaces/` (observed 2026-08-19 with `pa`
+  v0.1.0: headless runs created workspace and conversation directories only
+  under the `tui/` root).
 - **Evidence:** `no-public-source`.
 - **Upstream:** Posit's product documentation and the
   [posit-dev GitHub organization](https://github.com/posit-dev) were searched

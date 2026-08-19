@@ -723,15 +723,21 @@ var Registry = []AgentDef{
 		// Posit Assistant (posit-dev/assistant) stores one directory per
 		// conversation under workspaces/<workspaceId>/<conversationId>/,
 		// holding a conversation.json message tree plus an append-only
-		// lm-messages.jsonl transcript. Distinct from the Positron IDE's
-		// built-in Assistant above, which uses VS Code chatSessions files.
+		// lm-messages.jsonl transcript. The Positron extension writes under
+		// .posit/assistant/workspaces; the pa CLI (TUI and headless) writes
+		// the same layout under .posit/assistant/tui/workspaces, so both
+		// roots are scanned. Distinct from the Positron IDE's built-in
+		// Assistant above, which uses VS Code chatSessions files.
 		Type:        AgentPositAssistant,
 		DisplayName: "Posit Assistant",
 		EnvVar:      "POSIT_ASSISTANT_DIR",
 		ConfigKey:   "posit_assistant_dirs",
-		DefaultDirs: []string{".posit/assistant/workspaces"},
-		IDPrefix:    "posit-assistant:",
-		FileBased:   true,
+		DefaultDirs: []string{
+			".posit/assistant/workspaces",
+			".posit/assistant/tui/workspaces",
+		},
+		IDPrefix:  "posit-assistant:",
+		FileBased: true,
 	},
 	{
 		Type:        AgentZCode,
