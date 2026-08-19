@@ -85,7 +85,10 @@ func rejectClaudeSessionIDInShard(root, shard, sessionID string) error {
 	return nil
 }
 
-func locateRoot(m manifest) ([]string, error) {
+func locateRoot(ctx context.Context, m manifest) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	switch Provider(m.Provider) {
 	case ProviderClaude:
 		path := filepath.Join(
@@ -100,13 +103,22 @@ func locateRoot(m manifest) ([]string, error) {
 		}
 		return []string{path}, nil
 	case ProviderCodex:
-		return locateCodexRoot(m.ProviderRoot, m.ProviderSessionID, m.StartedAt, m.Limits)
+		return locateCodexRoot(
+			ctx, m.ProviderRoot, m.ProviderSessionID, m.StartedAt, m.Limits)
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", m.Provider)
 	}
 }
 
-func locateCodexRoot(root, id string, started time.Time, limits Limits) ([]string, error) {
+func locateCodexRoot(
+	ctx context.Context,
+	root, id string,
+	started time.Time,
+	limits Limits,
+) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !validUUID(id) {
 		return nil, nil
 	}
@@ -125,6 +137,9 @@ func locateCodexRoot(root, id string, started time.Time, limits Limits) ([]strin
 	var matches []string
 	examined := 0
 	for _, day := range ordered {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		dir := filepath.Join(root, filepath.FromSlash(day))
 		f, err := os.Open(dir)
 		if errors.Is(err, os.ErrNotExist) {
@@ -134,8 +149,16 @@ func locateCodexRoot(root, id string, started time.Time, limits Limits) ([]strin
 			return nil, err
 		}
 		for {
+			if err := ctx.Err(); err != nil {
+				f.Close()
+				return nil, err
+			}
 			entries, readErr := f.ReadDir(128)
 			for _, entry := range entries {
+				if err := ctx.Err(); err != nil {
+					f.Close()
+					return nil, err
+				}
 				examined++
 				if examined > limits.MaxSources*32 {
 					f.Close()
@@ -148,7 +171,8 @@ func locateCodexRoot(root, id string, started time.Time, limits Limits) ([]strin
 					continue
 				}
 				path := filepath.Join(dir, entry.Name())
-				matched, matchErr := codexMetaMatches(path, id, limits.MaxLineBytes)
+				matched, matchErr := codexMetaMatches(
+					ctx, path, id, limits.MaxLineBytes)
 				if matchErr != nil {
 					f.Close()
 					return nil, matchErr
@@ -173,9 +197,16 @@ func locateCodexRoot(root, id string, started time.Time, limits Limits) ([]strin
 	return matches, nil
 }
 
-func codexMetaMatches(path, id string, maxLine int) (bool, error) {
-	line, err := scanFirstLine(path, maxLine)
+func codexMetaMatches(
+	ctx context.Context,
+	path, id string,
+	maxLine int,
+) (bool, error) {
+	line, err := scanFirstLine(ctx, path, maxLine)
 	if err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
 		return false, err
 	}
 	var record struct {
@@ -184,7 +215,11 @@ func codexMetaMatches(path, id string, maxLine int) (bool, error) {
 			ID string `json:"id"`
 		} `json:"payload"`
 	}
-	if json.Unmarshal(line, &record) != nil {
+	decodeErr := json.Unmarshal(line, &record)
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if decodeErr != nil {
 		return false, nil
 	}
 	return record.Type == "session_meta" && strings.EqualFold(record.Payload.ID, id), nil
@@ -597,7 +632,7 @@ func awaitCodexChildPaths(
 		for _, child := range children {
 			raw := strings.TrimPrefix(child.ID, "codex:")
 			matches, err := locateCodexRoot(
-				state.manifest.ProviderRoot, raw,
+				ctx, state.manifest.ProviderRoot, raw,
 				child.SpawnedAt, state.manifest.Limits,
 			)
 			if err != nil {

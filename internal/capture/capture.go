@@ -578,7 +578,7 @@ func awaitQuiescentSources(
 		if err := ctx.Err(); err != nil {
 			return nil, finalizationError(foundRoot, missingRoot, err)
 		}
-		roots, err := locateRoot(state.manifest)
+		roots, err := locateRoot(ctx, state.manifest)
 		if err != nil {
 			return nil, err
 		}
@@ -694,7 +694,7 @@ func liveSourcesUnchanged(
 ) (bool, error) {
 	var paths []string
 	if Provider(state.manifest.Provider) == ProviderClaude {
-		roots, err := locateRoot(state.manifest)
+		roots, err := locateRoot(ctx, state.manifest)
 		if err != nil {
 			return false, err
 		}
@@ -747,7 +747,7 @@ func verifyCodexSourceSelections(
 			return nil, err
 		}
 		matches, err := locateCodexRoot(
-			state.manifest.ProviderRoot, selection.ID,
+			ctx, state.manifest.ProviderRoot, selection.ID,
 			selection.Anchor, state.manifest.Limits,
 		)
 		if err != nil {

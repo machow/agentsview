@@ -66,8 +66,9 @@ jobs:
     permissions:
       contents: read
     env:
-      AGENTSVIEW_CAPTURE_DIR: ${{ runner.temp }}/agentsview-capture
-      AGENTSVIEW_USAGE_RESULT: ${{ runner.temp }}/agentsview-usage.json
+      AGENTSVIEW_OCCURRENCE: diagnose-${{ github.run_id }}-${{ github.run_attempt }}
+      AGENTSVIEW_CAPTURE_DIR: ${{ runner.temp }}/agentsview-diagnose-${{ github.run_id }}-${{ github.run_attempt }}/capture
+      AGENTSVIEW_USAGE_RESULT: ${{ runner.temp }}/agentsview-diagnose-${{ github.run_id }}-${{ github.run_attempt }}/usage.json
 
     steps:
       - uses: actions/checkout@v4
@@ -82,11 +83,9 @@ jobs:
         shell: bash
         run: |
           set +e
-          occurrence="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}"
-
           agentsview capture run \
             --provider claude \
-            --occurrence "${occurrence}" \
+            --occurrence "${AGENTSVIEW_OCCURRENCE}" \
             --capture-dir "${AGENTSVIEW_CAPTURE_DIR}" \
             --result "${AGENTSVIEW_USAGE_RESULT}" \
             -- claude -p \
@@ -106,19 +105,23 @@ jobs:
           if [ -z "${status}" ]; then
             status=70
           fi
-          if [ ! -s "${AGENTSVIEW_USAGE_RESULT}" ] || \
-             jq -e '.reporting.outcome == "failed"' \
-               "${AGENTSVIEW_USAGE_RESULT}" >/dev/null; then
+          if ! jq -e --arg occurrence "${AGENTSVIEW_OCCURRENCE}" \
+            '.occurrence_id == $occurrence and
+             .reporting.outcome == "complete"' \
+            "${AGENTSVIEW_USAGE_RESULT}" >/dev/null 2>&1; then
             agentsview capture report \
               --capture-dir "${AGENTSVIEW_CAPTURE_DIR}" \
               --result "${AGENTSVIEW_USAGE_RESULT}"
-          fi
-          if jq -e \
-            '.reporting.outcome == "complete" and
-             (.execution.exit_code | type == "number")' \
-            "${AGENTSVIEW_USAGE_RESULT}" >/dev/null; then
-            status="$(jq -r '.execution.exit_code' \
-              "${AGENTSVIEW_USAGE_RESULT}")"
+            report_status=$?
+            if [ "${report_status}" -eq 0 ] && \
+              jq -e --arg occurrence "${AGENTSVIEW_OCCURRENCE}" \
+                '.occurrence_id == $occurrence and
+                 .reporting.outcome == "complete" and
+                 (.execution.exit_code | type == "number")' \
+                "${AGENTSVIEW_USAGE_RESULT}" >/dev/null; then
+              status="$(jq -r '.execution.exit_code' \
+                "${AGENTSVIEW_USAGE_RESULT}")"
+            fi
           fi
           echo "status=${status}" >> "${GITHUB_OUTPUT}"
 
@@ -157,10 +160,14 @@ jobs:
 ```
 
 Use the install method and version pin required by your organization. The
-example uploads usage and transcripts as separate artifacts because they have
-different disclosure and retention needs. Removing the capture directory after
-successful export deletes its source copies and recovery database from the
-runner. Do not remove it before the final `capture report` attempt.
+occurrence-specific paths prevent another workflow attempt from supplying stale
+state. Recovery changes the saved status only after it successfully replaces a
+missing or failed report; a complete initial report therefore cannot hide a
+post-start stream error. The example uploads usage and transcripts as separate
+artifacts because they have different disclosure and retention needs. Removing
+the capture directory after successful export deletes its source copies and
+recovery database from the runner. Do not remove it before the final
+`capture report` attempt.
 
 `capture run` does not impose a runtime timeout on Claude or Codex. Use the
 workflow's `timeout-minutes` for that policy. AgentsView applies only its

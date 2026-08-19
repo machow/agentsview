@@ -2,6 +2,7 @@ package capture
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -456,21 +457,34 @@ func encodeClaudeWorkDir(dir string) string {
 
 // scanFirstLine is used only for exact candidate validation. It stops before
 // allocating beyond the caller's JSONL line bound.
-func scanFirstLine(path string, max int) ([]byte, error) {
+func scanFirstLine(ctx context.Context, path string, max int) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	r := bufio.NewReaderSize(f, min(max, 64<<10))
+	return scanFirstLineReader(ctx, f, max)
+}
+
+func scanFirstLineReader(ctx context.Context, input io.Reader, max int) ([]byte, error) {
+	r := bufio.NewReaderSize(input, min(max, 64<<10))
 	line := make([]byte, 0, min(max, 64<<10))
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		chunk, readErr := r.ReadSlice('\n')
 		if len(chunk) > max-len(line) {
 			return nil, errorWithReason(
 				ReasonSourceBytesLimit, "first JSONL line exceeds limit")
 		}
 		line = append(line, chunk...)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		switch {
 		case readErr == nil, errors.Is(readErr, io.EOF):
 			return line, nil

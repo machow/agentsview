@@ -1434,11 +1434,28 @@ func TestCodexExactLookupCoversLocalAndUTCDateShards(t *testing.T) {
 				id, "/workspace", "codex_exec", "2026-08-17T04:30:00Z")
 			require.NoError(t, os.WriteFile(path, []byte(meta+"\n"), 0o600))
 
-			matches, err := locateCodexRoot(root, id, started, testLimits())
+			matches, err := locateCodexRoot(
+				t.Context(), root, id, started, testLimits())
 			require.NoError(t, err)
 			assert.Equal(t, []string{path}, matches)
 		})
 	}
+}
+
+func TestCodexExactLookupStopsWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	matches, err := locateCodexRoot(
+		ctx,
+		t.TempDir(),
+		"11111111-1111-4111-8111-111111111111",
+		time.Now(),
+		testLimits(),
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Empty(t, matches)
 }
 
 func TestConcurrentClaudeCapturesCannotSelectEachOthersSessions(t *testing.T) {
