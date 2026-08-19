@@ -227,6 +227,10 @@ Grok section and remove the explicit registry exception in the coverage test.
   transcript can still contain usable token records. Because an unparseable
   middle record may hide usage, one-shot capture marks assurance partial when
   any included session reports parser-malformed lines.
+  One-shot correlation reserves the provider root, encoded working directory,
+  and explicit UUID across processes until finalization ends. The final usage
+  read keeps SQLite ordering, snapshot selection, deduplication, pricing, and
+  token projection under the same bounded finalization context.
 
 ## OpenClaude (`openclaude`)
 

@@ -1566,6 +1566,85 @@ func TestConcurrentClaudeCapturesCannotSelectEachOthersSessions(t *testing.T) {
 		[]string{first.result.OccurrenceID, second.result.OccurrenceID})
 }
 
+func TestConcurrentClaudeCapturesCannotReserveSameSession(t *testing.T) {
+	root := t.TempDir()
+	workDir := t.TempDir()
+	producer := copyCaptureHelper(t, "claude")
+	sessionID := "44444444-4444-4444-8444-444444444444"
+	marker := filepath.Join(t.TempDir(), "producer-started")
+	release := filepath.Join(t.TempDir(), "release-producer")
+	firstCaptureDir := filepath.Join(t.TempDir(), "capture-first")
+	firstResultPath := filepath.Join(t.TempDir(), "result-first.json")
+	t.Cleanup(func() { _ = os.WriteFile(release, []byte("release"), 0o600) })
+
+	type response struct {
+		outcome RunOutcome
+		err     error
+	}
+	firstDone := make(chan response, 1)
+	go func() {
+		outcome, err := Run(t.Context(), RunOptions{
+			Provider: ProviderClaude, OccurrenceID: "reserved-first",
+			ProviderSessionID: sessionID,
+			CaptureDir:        firstCaptureDir,
+			ResultPath:        firstResultPath,
+			ProviderRoot:      root, WorkDir: workDir,
+			Command: []string{
+				producer, "--session-id", sessionID, "-p", "prompt",
+			},
+			Environment: append(
+				helperEnvironment(root, "claude-block-before-source", 0),
+				"AGENTSVIEW_CAPTURE_TEST_SIGNAL_MARKER="+marker,
+				"AGENTSVIEW_CAPTURE_TEST_RELEASE_MARKER="+release,
+			),
+			Streams: Streams{Stdout: io.Discard, Stderr: io.Discard},
+			Limits:  testLimits(), CustomPricing: testPricing(),
+		})
+		firstDone <- response{outcome: outcome, err: err}
+	}()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	secondCaptureDir := filepath.Join(t.TempDir(), "capture-second")
+	var secondOutput bytes.Buffer
+	secondLimits := testLimits()
+	secondLimits.FinalizationWait = 200 * time.Millisecond
+	_, err := Run(t.Context(), RunOptions{
+		Provider: ProviderClaude, OccurrenceID: "reserved-second",
+		ProviderSessionID: sessionID,
+		CaptureDir:        secondCaptureDir,
+		ResultPath:        filepath.Join(t.TempDir(), "result-second.json"),
+		ProviderRoot:      root, WorkDir: workDir,
+		Command: []string{
+			producer, "--session-id", sessionID, "-p", "prompt",
+		},
+		Environment: helperEnvironment(root, "none", 0),
+		Streams:     Streams{Stdout: &secondOutput, Stderr: io.Discard},
+		Limits:      secondLimits,
+	})
+	require.ErrorContains(t, err, "already reserved")
+	assert.Empty(t, secondOutput.String())
+	assert.NoDirExists(t, secondCaptureDir)
+
+	require.NoError(t, os.WriteFile(release, []byte("release"), 0o600))
+	resolvedWorkDir, err := resolveWorkDir(workDir)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(
+			root, encodeClaudeWorkDir(resolvedWorkDir), sessionID+".jsonl",
+		))
+		return err == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	select {
+	case first := <-firstDone:
+		require.NoError(t, first.err)
+		assert.Equal(t, 0, first.outcome.ExitCode)
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "reserved capture did not finish after release")
+	}
+}
+
 func TestClaudeCaptureUsesCanonicalDelegatedUsageWithoutDoubleCounting(t *testing.T) {
 	root := t.TempDir()
 	resultPath := filepath.Join(t.TempDir(), "result.json")
@@ -1924,6 +2003,17 @@ func captureTestHelper() {
 		sessionID, _ := optionValue(os.Args[1:], "--session-id")
 		if sessionID == "" {
 			sessionID = os.Getenv("AGENTSVIEW_CAPTURE_TEST_SESSION_ID")
+		}
+		if mode == "claude-block-before-source" {
+			marker := os.Getenv("AGENTSVIEW_CAPTURE_TEST_SIGNAL_MARKER")
+			release := os.Getenv("AGENTSVIEW_CAPTURE_TEST_RELEASE_MARKER")
+			_ = os.WriteFile(marker, []byte("started"), 0o600)
+			for {
+				if _, err := os.Stat(release); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 		}
 		cwd, _ := os.Getwd()
 		path := filepath.Join(root, encodeClaudeWorkDir(cwd), sessionID+".jsonl")

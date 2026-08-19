@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -78,10 +79,49 @@ func TestForwardSignalsRecordsInterruptAfterSuccessfulChild(t *testing.T) {
 		"-test.run=^TestForwardSignalsRecordsInterruptAfterSuccessfulChild$")
 	cmd.Env = append(os.Environ(), "AGENTSVIEW_CAPTURE_WINDOWS_EXIT_ZERO=1")
 	require.NoError(t, cmd.Start())
+	require.NoError(t, cmd.Wait())
 	signals := make(chan os.Signal, 2)
 	stopForwarding := forwardSignals(cmd.Process, signals)
 	signals <- os.Interrupt
-	require.NoError(t, cmd.Wait())
+
+	signalName, exitCode := stopForwarding()
+	assert.Equal(t, "SIGINT", signalName)
+	assert.Equal(t, 130, exitCode)
+}
+
+func TestForwardSignalsStopsBlockingChild(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "child-started")
+	producer := copyCaptureHelper(t, "claude")
+	cmd := exec.Command(producer, "-p", "prompt")
+	cmd.Env = append(
+		helperEnvironment(root, "claude-ignore-signal", 0),
+		"AGENTSVIEW_CAPTURE_TEST_SIGNAL_MARKER="+marker,
+	)
+	configureChildProcess(cmd)
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	signals := make(chan os.Signal, 2)
+	stopForwarding := forwardSignals(cmd.Process, signals)
+	signals <- os.Interrupt
+	signals <- os.Interrupt
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+	select {
+	case err := <-waited:
+		require.Error(t, err)
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "blocking child survived repeated interrupts")
+	}
 
 	signalName, exitCode := stopForwarding()
 	assert.Equal(t, "SIGINT", signalName)

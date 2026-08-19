@@ -21,7 +21,9 @@ process ID, the newest transcript, or a time-window scan.
 
 On Windows, the producer command must resolve to a native executable.
 AgentsView rejects `.cmd` and `.bat` shims because they cannot preserve an
-untrusted argument boundary safely.
+untrusted argument boundary safely. The producer runs in its own console
+process group; an interrupt is relayed to that group, and a failed relay or a
+repeated interrupt terminates a producer that remains blocked.
 
 Each supported command must start a fresh provider session. Claude continuation,
 resume, fork, pull-request resume, and teleport options are rejected. Codex
@@ -172,10 +174,11 @@ recovery database from the runner. Do not remove it before the final
 `capture run` does not impose a runtime timeout on Claude or Codex. Use the
 workflow's `timeout-minutes` for that policy. AgentsView applies only its
 bounded post-exit finalization timeout. That deadline covers source polling,
-copying, isolated database setup, pricing, ingestion, shutdown, and
-verification. If these flags are customized, `--quiescence` must be shorter
-than `--finalization-timeout`; invalid timing bounds are rejected before the
-producer starts and cannot become recovery state.
+copying, isolated database setup, ingestion, usage-row sorting and
+deduplication, pricing, token projection, shutdown, and verification. If these
+flags are customized, `--quiescence` must be shorter than
+`--finalization-timeout`; invalid timing bounds are rejected before the producer
+starts and cannot become recovery state.
 
 ## Codex
 
@@ -235,7 +238,12 @@ work.
 
 The UUID must use lowercase hexadecimal and be new: `capture run` rejects
 uppercase UUIDs, an existing exact root transcript, or a delegated-session tree
-before it starts the producer.
+before it starts the producer. AgentsView also reserves the provider root,
+Claude working directory, and UUID through finalization, so two concurrent
+captures cannot claim the same deterministic transcript.
+The provider root retains one owner-private reservation registry lock; active
+per-session entries are removed when finalization ends and contain no transcript
+content.
 
 Standard input is inherited unchanged, so prompt-on-stdin works:
 

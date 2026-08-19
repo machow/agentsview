@@ -167,6 +167,16 @@ func Run(ctx context.Context, opts RunOptions) (RunOutcome, error) {
 	if err != nil {
 		return RunOutcome{}, err
 	}
+	var reservation *claudeSessionReservation
+	if opts.Provider == ProviderClaude {
+		reservation, err = reserveClaudeSession(
+			ctx, prepared.root, prepared.providerWorkDir, prepared.sessionID,
+		)
+		if err != nil {
+			return RunOutcome{}, err
+		}
+		defer reservation.close()
+	}
 	started := time.Now()
 	state, err := createState(opts.CaptureDir, manifest{
 		OccurrenceID:      opts.OccurrenceID,

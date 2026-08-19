@@ -3487,6 +3487,9 @@ func sessionUsageBreakdownLabel(r usageScanRow) string {
 func (db *DB) GetSessionUsage(
 	ctx context.Context, sessionID string, includeBreakdown bool,
 ) (*SessionUsage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	sess, err := db.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, err
@@ -3524,6 +3527,9 @@ func (db *DB) GetSessionUsage(
 
 	var usageRows []usageScanRow
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		r, scanErr := scanUsageRow(rows)
 		if scanErr != nil {
 			return nil, fmt.Errorf("scanning session usage row: %w", scanErr)
@@ -3535,6 +3541,9 @@ func (db *DB) GetSessionUsage(
 	}
 	snapshotRows := make([]activity.UsageRow, len(usageRows))
 	for i, r := range usageRows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		var outputTokens int
 		if r.usageSource == "message" {
 			_, outputTokens, _, _ = clampedUsageTokenCounters(r.tokenJSON)
@@ -3555,11 +3564,17 @@ func (db *DB) GetSessionUsage(
 			ClaudeRequestID: r.claudeRequestID,
 		}
 	}
-	snapshotMask, _, snapshotWebSearchRequests :=
-		activity.ClaudeSnapshotSurvivorSelection(snapshotRows)
+	snapshotMask, _, snapshotWebSearchRequests, err :=
+		activity.ClaudeSnapshotSurvivorSelectionContext(ctx, snapshotRows)
+	if err != nil {
+		return nil, err
+	}
 	deduplicatedOutputTokens := 0
 	seen := make(map[usageDedupToken]struct{})
 	for i, r := range usageRows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !snapshotMask[i] {
 			deduplicatedOutputTokens += snapshotRows[i].OutputTokens
 			continue
@@ -3618,15 +3633,30 @@ func (db *DB) GetSessionUsage(
 	if authoritativeCost != nil && len(breakdown) > 0 {
 		weights := make([]money.Money, len(breakdown))
 		for i := range breakdown {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			weights[i] = breakdown[i].Cost
 		}
-		costs := export.AllocateCostByWeight(*authoritativeCost, weights)
+		costs, err := export.AllocateCostByWeightContext(
+			ctx, *authoritativeCost, weights,
+		)
+		if err != nil {
+			return nil, err
+		}
 		for i := range breakdown {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			breakdown[i].Cost = costs[i]
 			breakdown[i].HasCost = true
 		}
 	}
 
+	models, err := sortedSetKeysContext(ctx, modelsSet)
+	if err != nil {
+		return nil, err
+	}
 	out := &SessionUsage{
 		SessionID:         sess.ID,
 		Agent:             sess.Agent,
@@ -3634,7 +3664,7 @@ func (db *DB) GetSessionUsage(
 		TotalOutputTokens: max(sess.TotalOutputTokens-deduplicatedOutputTokens, 0),
 		PeakContextTokens: sess.PeakContextTokens,
 		HasTokenData:      sess.HasTotalOutputTokens || sess.HasPeakContextTokens,
-		Models:            sortedSetKeys(modelsSet),
+		Models:            models,
 		HasCost:           authoritativeCost != nil || (contributing && allPriced),
 		BreakdownCount:    breakdownCount,
 		Breakdown:         breakdown,
@@ -3651,7 +3681,13 @@ func (db *DB) GetSessionUsage(
 	}
 	out.CostUSD = CostUSDFromCost(out.HasCost, out.Cost)
 	if len(unpricedSet) > 0 {
-		out.UnpricedModels = sortedSetKeys(unpricedSet)
+		out.UnpricedModels, err = sortedSetKeysContext(ctx, unpricedSet)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -3659,12 +3695,27 @@ func (db *DB) GetSessionUsage(
 // sortedSetKeys returns the map keys sorted; never nil so JSON
 // renders "[]" rather than "null".
 func sortedSetKeys(set map[string]struct{}) []string {
+	out, err := sortedSetKeysContext(context.Background(), set)
+	if err != nil {
+		panic(err)
+	}
+	return out
+}
+
+func sortedSetKeysContext(
+	ctx context.Context, set map[string]struct{},
+) ([]string, error) {
 	out := make([]string, 0, len(set))
 	for k := range set {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		out = append(out, k)
 	}
-	sort.Strings(out)
-	return out
+	if err := stableSortContext(ctx, out, func(a, b string) bool { return a < b }); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // UsageSessionCounts holds distinct session counts grouped by

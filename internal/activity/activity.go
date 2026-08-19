@@ -538,12 +538,39 @@ func usageDedupTokenForRow(u UsageRow) (usageDedupToken, bool) {
 func ClaudeSnapshotSurvivorSelection(
 	usage []UsageRow,
 ) (mask []bool, attribution []string, webSearchRequests []int) {
-	return claudeSnapshotSurvivorSelection(usage, nil)
+	mask, attribution, webSearchRequests, err :=
+		ClaudeSnapshotSurvivorSelectionContext(context.Background(), usage)
+	if err != nil {
+		panic(err)
+	}
+	return mask, attribution, webSearchRequests
+}
+
+// ClaudeSnapshotSurvivorSelectionContext applies snapshot selection while
+// allowing bounded callers to stop large in-memory passes.
+func ClaudeSnapshotSurvivorSelectionContext(
+	ctx context.Context, usage []UsageRow,
+) (mask []bool, attribution []string, webSearchRequests []int, err error) {
+	return claudeSnapshotSurvivorSelectionContext(ctx, usage, nil)
 }
 
 func claudeSnapshotSurvivorSelection(
 	usage []UsageRow, eligible []bool,
 ) (mask []bool, attribution []string, webSearchRequests []int) {
+	mask, attribution, webSearchRequests, err :=
+		claudeSnapshotSurvivorSelectionContext(context.Background(), usage, eligible)
+	if err != nil {
+		panic(err)
+	}
+	return mask, attribution, webSearchRequests
+}
+
+func claudeSnapshotSurvivorSelectionContext(
+	ctx context.Context, usage []UsageRow, eligible []bool,
+) (mask []bool, attribution []string, webSearchRequests []int, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
 	mask = make([]bool, len(usage))
 	attribution = make([]string, len(usage))
 	webSearchRequests = make([]int, len(usage))
@@ -551,6 +578,9 @@ func claudeSnapshotSurvivorSelection(
 	earliest := make(map[claudeUsageSnapshotToken]int)
 	maximumWebSearchRequests := make(map[claudeUsageSnapshotToken]int)
 	for i, u := range usage {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		if eligible != nil && !eligible[i] {
 			continue
 		}
@@ -576,11 +606,14 @@ func claudeSnapshotSurvivorSelection(
 			maximumWebSearchRequests[key], u.WebSearchRequests)
 	}
 	for key, i := range best {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, err
+		}
 		mask[i] = true
 		attribution[i] = usage[earliest[key]].SessionID
 		webSearchRequests[i] = maximumWebSearchRequests[key]
 	}
-	return mask, attribution, webSearchRequests
+	return mask, attribution, webSearchRequests, nil
 }
 
 func earlierClaudeSnapshotAttribution(candidate, current UsageRow) bool {

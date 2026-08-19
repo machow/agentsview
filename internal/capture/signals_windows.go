@@ -7,9 +7,16 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
+	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
-func configureChildProcess(*exec.Cmd) {}
+func configureChildProcess(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP,
+	}
+}
 
 func registerChildSignals() chan os.Signal {
 	ch := make(chan os.Signal, 2)
@@ -28,8 +35,21 @@ func forwardSignals(
 	var wg sync.WaitGroup
 	var first os.Signal
 	wg.Go(func() {
+		interrupts := 0
 		first = relayWindowsSignals(ch, done, func(sig os.Signal) {
-			_ = process.Signal(sig)
+			if sig != os.Interrupt {
+				return
+			}
+			interrupts++
+			if interrupts > 1 {
+				_ = process.Kill()
+				return
+			}
+			if err := windows.GenerateConsoleCtrlEvent(
+				windows.CTRL_BREAK_EVENT, uint32(process.Pid),
+			); err != nil {
+				_ = process.Kill()
+			}
 		})
 	})
 	return func() (string, int) {

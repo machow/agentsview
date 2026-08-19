@@ -46,6 +46,9 @@ func rejectExistingClaudeSources(root, sessionID string, limits Limits) error {
 	for {
 		entries, readErr := dir.ReadDir(128)
 		for _, entry := range entries {
+			if entry.Name() == claudeReservationDirName {
+				continue
+			}
 			examined++
 			if examined > limits.MaxSources*32 {
 				return errorWithReason(
